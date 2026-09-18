@@ -11,6 +11,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_ACCOUNTS: invalid config/crew-accounts.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
@@ -1077,6 +1078,12 @@ crew_dispatch_validate() {
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
       or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
+    # A profile account names one entry in local config/crew-accounts.json, so it
+    # must be a bare name rather than a path or a free-form label; whether that
+    # entry exists is resolved at spawn by bin/fm-account-choose.sh, which owns
+    # the account selection and refuses an unknown name.
+    def malformed_accounts($items):
+      ($items | any(has("account") and (((.account | type) != "string") or ((.account | test("^[a-z0-9][a-z0-9._-]*$")) | not))));
     # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
     # it in code against one quota-axi row, so scope and min_percent must be
     # concrete; a rule floor also names the provider whose row it reads.
@@ -1106,6 +1113,7 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif malformed_accounts([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile account must be a crew-accounts.json name matching ^[a-z0-9][a-z0-9._-]*$"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
       if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "use profile model and effort must be non-empty strings when present"
@@ -1121,6 +1129,7 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and malformed_accounts([profiles(.default)[]?]) then "default profile account must be a crew-accounts.json name matching ^[a-z0-9][a-z0-9._-]*$"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
       if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "default profile model and effort must be non-empty strings when present"
@@ -1161,6 +1170,33 @@ crew_dispatch_validate() {
     | .[]
   ' "$file"
   fi
+}
+
+# Subscription-account configuration (config/crew-accounts.json). Its schema and
+# selection rules are owned once by docs/configuration.md "Crew accounts" and
+# enforced by bin/fm-account-choose.sh, which this calls rather than restating.
+# That validator is local and offline: it proves the schema and that each
+# declared store path is an existing directory, so a broken path is reported at
+# session start instead of failing the first codex or claude dispatch. The file
+# is host-local and is deliberately not inherited by secondmate homes.
+crew_accounts_validate() {
+  local file out
+  file="$CONFIG/crew-accounts.json"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  out=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-account-choose.sh" --validate 2>&1) && return 0
+  out=$(printf '%s\n' "$out" | sed -n 's/^error: //p' | head -1)
+  out=${out#"$file"}
+  out=${out# - }
+  out=${out#: }
+  out=${out#" "}
+  [ -n "$out" ] || out="could not be validated"
+  echo "CREW_ACCOUNTS: invalid config/crew-accounts.json - $out"
 }
 
 # Same-home record reconciliation. Every ordinary dispatch and completion now
@@ -1440,6 +1476,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  crew_accounts_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

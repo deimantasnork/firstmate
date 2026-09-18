@@ -543,6 +543,14 @@
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/examples/crew-accounts.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/verification/crew-accounts.md",
+      "audience": "maintainer-verification"
     }
   ]
 }

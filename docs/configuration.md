@@ -998,7 +998,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "account": "<optional crew-accounts.json name>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -1017,10 +1017,11 @@ This section is the single owner of the canonical schema and its per-field seman
 | Rule `when` and `use` | Required for each rule. |
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
-| Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `model`, `effort`, and `account`; rule `why` | Optional. |
+
+A profile `account` optionally names one entry in local [crew accounts](#crew-accounts-configcrew-accountsjson), and firstmate passes it to `fm-spawn.sh --account` as that task's explicit subscription-account pin; without it the spawn selects an account itself.
 
 **Fields applied only by typed resolution**
-
 Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 
@@ -1082,6 +1083,58 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Crew accounts (config/crew-accounts.json)
+
+`config/crew-accounts.json` is an optional local, gitignored file naming the subscription accounts a codex or claude spawn may run on, so a second paid account is actually spent instead of every worker sharing the CLI's default store.
+The file holds absolute store paths, so it is host-local and is deliberately NOT one of the [inherited local material](#operational-home-layout-and-state) items: each home that should select accounts configures its own file.
+[`bin/fm-account-choose.sh`](../bin/fm-account-choose.sh) is the selection owner and its header owns the probe and output mechanics; this section owns the schema.
+
+```json
+{
+  "accounts": [
+    {
+      "name": "lets-padel",
+      "codex_home": "/home/me/.codex-lets-padel",
+      "claude_config_dir": "/home/me/.claude"
+    },
+    {
+      "name": "karolina",
+      "codex_home": "/home/me/.codex-karolina",
+      "claude_config_dir": "/home/me/.claude-karolina",
+      "reserve": { "claude": 20 }
+    }
+  ],
+  "order": {
+    "codex": ["lets-padel", "karolina"],
+    "claude": ["lets-padel", "karolina"]
+  }
+}
+```
+
+`accounts` is required and non-empty.
+Each entry needs a unique `name` matching `^[a-z0-9][a-z0-9._-]*$`, one or both of `codex_home` and `claude_config_dir`, and may carry an optional per-vendor `reserve`.
+A store path is absolute or starts with `~/`, carries no control character, and must be an existing directory when it is used; a violation is a configuration error, reported at session start and refused at spawn rather than selected around.
+`reserve` maps `codex` and/or `claude` to a percentage from 0 through 100, and that account is not chosen for that vendor while its own measured effective remaining percent is below that reserve.
+`order` is optional and maps each vendor to the fill-first account order; an account the list omits follows the listed ones in declaration order, so adding an account never silently excludes it.
+Absent `order` means declaration order, and an absent file means every spawn keeps today's single-store behavior.
+
+Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single owner:
+
+- The candidates are that vendor's accounts in order, and each is measured by one `quota-axi --provider <vendor> --profile-only --json` read with that account's own store in `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the evidence is per account rather than ambient and nothing is refreshed or written.
+- An account is disqualified only on measured evidence: an `exhausted_now` runway, a known 0 percent, or a known percent below its own reserve.
+- Unmeasurable headroom - a store `quota-axi` cannot read, including an expired access token that only a real vendor call would refresh - is disclosed uncertainty and never a block, so such an account stays selectable and is reported as `measured=no`.
+- The first account that is not measurably disqualified is chosen, so an earlier account is drained down to its reserve before the next one is touched.
+- When every account for that vendor is measurably disqualified the spawn refuses and prints the candidate evidence; an explicit pin still selects one.
+
+`fm-spawn.sh` forwards the chosen store onto that launch as `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the choice is per dispatch rather than ambient, and records it on the task record as `account=`.
+A pre-set store is forwarded only when this home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
+
+`--account <name>` pins one account for that task, either from a dispatch profile's `account` field or from firstmate's own call.
+A pin is an explicit decision, so it bypasses the order, the reserve, and the exhaustion check, and its own evidence is still reported.
+An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
+A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
+On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
@@ -1124,7 +1177,6 @@ After the answer, code applies all remaining checks and ranking:
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
-
 - An expanded provider with no matching account row leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 
@@ -1150,7 +1202,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 | Result | Meaning |
 | --- | --- |
-| `clear` | A `profile:` line ready for `fm-spawn.sh`. |
+| `clear` | A `profile:` line ready for `fm-spawn.sh`, carrying the matched profile's `--account` pin when it declares one. |
 | `ambiguous` | Confidence below the floor with no runner-up taken. |
 | `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
 | `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
@@ -1162,7 +1214,6 @@ Every result above exits 0.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
-
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 
