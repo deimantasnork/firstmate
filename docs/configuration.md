@@ -998,7 +998,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "account": "<optional crew-accounts.json name>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -1017,9 +1017,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Rule `when` and `use` | Required for each rule. |
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
-| Profile `model`, `effort`, and `account`; rule `why` | Optional. |
-
-A profile `account` optionally names one entry in local [crew accounts](#crew-accounts-configcrew-accountsjson), and firstmate passes it to `fm-spawn.sh --account` as that task's explicit subscription-account pin; without it the spawn selects an account itself.
+| Profile `model` and `effort`; rule `why` | Optional. |
 
 **Fields applied only by typed resolution**
 Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
@@ -1093,20 +1091,20 @@ The file holds absolute store paths, so it is host-local and is deliberately NOT
 {
   "accounts": [
     {
-      "name": "lets-padel",
-      "codex_home": "/home/me/.codex-lets-padel",
+      "name": "primary",
+      "codex_home": "/home/me/.codex-primary",
       "claude_config_dir": "/home/me/.claude"
     },
     {
-      "name": "karolina",
-      "codex_home": "/home/me/.codex-karolina",
-      "claude_config_dir": "/home/me/.claude-karolina",
+      "name": "secondary",
+      "codex_home": "/home/me/.codex-secondary",
+      "claude_config_dir": "/home/me/.claude-secondary",
       "reserve": { "claude": 20 }
     }
   ],
   "order": {
-    "codex": ["lets-padel", "karolina"],
-    "claude": ["lets-padel", "karolina"]
+    "codex": ["primary", "secondary"],
+    "claude": ["primary", "secondary"]
   }
 }
 ```
@@ -1129,11 +1127,11 @@ Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single
 `fm-spawn.sh` forwards the chosen store onto that launch as `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the choice is per dispatch rather than ambient, and records it on the task record as `account=`.
 A pre-set store is forwarded only when this home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
 
-`--account <name>` pins one account for that task, either from a dispatch profile's `account` field or from firstmate's own call.
+`--account <name>` pins one account for that task.
 A pin is an explicit decision, so it bypasses the order, the reserve, and the exhaustion check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
 A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
-An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with a store for the vendor; an account pin an inherited dispatch profile carries but the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a profile change on the primary never refuses that home's dispatch.
+An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with a store for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
@@ -1203,7 +1201,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 | Result | Meaning |
 | --- | --- |
-| `clear` | A `profile:` line ready for `fm-spawn.sh`, carrying the matched profile's `--account` pin when it declares one. |
+| `clear` | A `profile:` line ready for `fm-spawn.sh`. |
 | `ambiguous` | Confidence below the floor with no runner-up taken. |
 | `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
 | `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |

@@ -1238,25 +1238,6 @@ ROWS
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
   assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
-  # A profile account names one entry in the account file, so bootstrap checks
-  # only its shape here; whether that entry exists is resolved at spawn by
-  # bin/fm-account-choose.sh, which refuses an unknown name.
-  printf '%s\n' '{"rules":[{"when":"account work","use":{"harness":"codex","account":"karolina"}}]}' > "$case_dir/home/config/crew-dispatch.json"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "a well-formed profile account name must stay silent, got: $out"
-
-  printf '%s\n' '{"rules":[{"when":"account work","use":{"harness":"codex","account":"../evil"}}]}' > "$case_dir/home/config/crew-dispatch.json"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile account must be a crew-accounts.json name matching ^[a-z0-9][a-z0-9._-]*$' ] \
-    || fail "a malformed profile account name must be flagged, got: $out"
-
-  printf '%s\n' '{"default":[{"harness":"codex","account":5}]}' > "$case_dir/home/config/crew-dispatch.json"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - default profile account must be a crew-accounts.json name matching ^[a-z0-9][a-z0-9._-]*$' ] \
-    || fail "a non-string default profile account must be flagged, got: $out"
 
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
@@ -1268,11 +1249,11 @@ test_crew_accounts_validation() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
-  store="$case_dir/store-lets-padel"
+  store="$case_dir/store-primary"
   mkdir -p "$store"
   missing="$case_dir/store-missing"
 
-  printf '%s\n' "{\"accounts\":[{\"name\":\"lets-padel\",\"codex_home\":\"$store\"}]}" \
+  printf '%s\n' "{\"accounts\":[{\"name\":\"primary\",\"codex_home\":\"$store\"}]}" \
     > "$case_dir/home/config/crew-accounts.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -1284,18 +1265,18 @@ test_crew_accounts_validation() {
   [ "$out" = 'CREW_ACCOUNTS: invalid config/crew-accounts.json - is malformed JSON' ] \
     || fail "a malformed account file must be flagged, got: $out"
 
-  printf '%s\n' '{"accounts":[{"name":"lets-padel","codex_home":"relative/path"}]}' \
+  printf '%s\n' '{"accounts":[{"name":"primary","codex_home":"relative/path"}]}' \
     > "$case_dir/home/config/crew-accounts.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_ACCOUNTS: invalid config/crew-accounts.json - each store path must be absolute or start with ~/ and carry no control character' ] \
     || fail "a relative store path must be flagged, got: $out"
 
-  printf '%s\n' "{\"accounts\":[{\"name\":\"lets-padel\",\"codex_home\":\"$missing\"}]}" \
+  printf '%s\n' "{\"accounts\":[{\"name\":\"primary\",\"codex_home\":\"$missing\"}]}" \
     > "$case_dir/home/config/crew-accounts.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "CREW_ACCOUNTS: invalid config/crew-accounts.json - account lets-padel codex_home is not an existing directory: $missing" ] \
+  [ "$out" = "CREW_ACCOUNTS: invalid config/crew-accounts.json - account primary codex_home is not an existing directory: $missing" ] \
     || fail "a missing store directory must be flagged with its path, got: $out"
 
   rm -f "$case_dir/home/config/crew-accounts.json"
