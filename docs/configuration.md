@@ -1128,7 +1128,7 @@ The file holds absolute store paths, so it is host-local and is deliberately NOT
 }
 ```
 
-`accounts` is required and non-empty.
+`accounts` is required and non-empty, and it is the only accepted top-level key; a leftover top-level `reserve` or `order` from an earlier schema is a configuration error rather than a silently ignored setting.
 Each entry needs a unique `name` matching `^[a-z0-9][a-z0-9._-]*$`, one or both of `codex_home` and `claude_config_dir`, and may carry an optional per-vendor `reserve`.
 A store path is absolute or starts with `~/`, carries no control character, and must be an existing directory when it is used; a violation is a configuration error, reported at session start and refused at spawn rather than selected around.
 `reserve` maps `codex` and/or `claude` to a percentage from 0 through 100, and that account is not chosen automatically for that vendor while its own measured effective remaining percent is at or below that reserve.
