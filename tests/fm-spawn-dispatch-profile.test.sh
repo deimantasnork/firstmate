@@ -1920,8 +1920,7 @@ write_accounts_config() {  # <home> <codex-a> <codex-b> <claude-a> <claude-b>
   "accounts": [
     { "name": "primary", "codex_home": "$2", "claude_config_dir": "$4" },
     { "name": "secondary", "codex_home": "$3", "claude_config_dir": "$5", "reserve": { "claude": 20 } }
-  ],
-  "order": { "codex": ["primary", "secondary"], "claude": ["primary", "secondary"] }
+  ]
 }
 JSON
 }
@@ -2160,6 +2159,26 @@ JSON
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CODEX_HOME" "a pin the home does not declare selected a store anyway"
   [ ! -s "$CASE_DIR/quota.log" ] || fail "an undeclared pin still probed the account stores"
+
+  # A declared pin whose store directory is missing is unresolvable too.
+  local missing_store
+  missing_store="$CASE_DIR/store-missing"
+  rm -rf "$missing_store"
+  cat > "$HOME_DIR/config/crew-accounts.json" <<JSON
+{
+  "accounts": [
+    { "name": "secondary", "codex_home": "$missing_store" }
+  ]
+}
+JSON
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
+  status=$?
+  expect_code 0 "$status" "a pin whose declared store is missing must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "cannot resolve --account secondary" "the missing-store pin was not disclosed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "a pin with a missing store selected a store anyway"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "a pin with a missing store still probed the account stores"
   pass "a secondmate home ignores an account pin its own config cannot resolve"
 }
 
