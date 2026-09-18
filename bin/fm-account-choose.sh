@@ -209,11 +209,13 @@ config_schema_error() {
       and (($p | [explode[] | select(. < 32)] | length) == 0);
     def field_ok($e):
       ["name", "reserve"] + store_fields | index($e.key) != null;
-    (.accounts // []) as $accounts |
-    [$accounts[].name] as $names |
     if type != "object" then "top-level value must be an object"
+    elif has("reserve") then "reserve must be set per account (accounts[].reserve), not at the top level"
     elif (.accounts | type) != "array" then "accounts must be an array"
-    elif ($accounts | length) == 0 then "accounts needs at least one account"
+    else
+    .accounts as $accounts |
+    [$accounts[] | if type == "object" then .name else null end] as $names |
+    if ($accounts | length) == 0 then "accounts needs at least one account"
     elif ([$accounts[] | select(type != "object")] | length) > 0 then "each account must be an object"
     elif ([$accounts[] | select((.name | type) != "string" or ((.name | test(name_re)) | not))] | length) > 0
       then "each account needs a name matching ^[a-z0-9][a-z0-9._-]*$"
@@ -230,11 +232,6 @@ config_schema_error() {
       then "account reserve names a vendor other than codex or claude"
     elif ([$accounts[] | .reserve // {} | to_entries[] | select((.value | type) != "number" or .value < 0 or .value > 100)] | length) > 0
       then "each account reserve must be a number from 0 through 100"
-    elif has("reserve") and ((.reserve | type) != "object") then "reserve must be an object keyed by vendor"
-    elif has("reserve") and ([.reserve | keys[] | select(vendors | index(.) == null)] | length) > 0
-      then "reserve names a vendor other than codex or claude"
-    elif has("reserve") and ([.reserve | to_entries[] | select((.value | type) != "number" or .value < 0 or .value > 100)] | length) > 0
-      then "each reserve must be a number from 0 through 100"
     elif has("order") and ((.order | type) != "object") then "order must be an object keyed by vendor"
     elif has("order") and ([.order | keys[] | select(. as $k | (vendors | index($k)) == null)] | length) > 0
       then "order names a vendor other than codex or claude"
@@ -247,6 +244,7 @@ config_schema_error() {
     elif has("order") and ([.order | to_entries[] | .value[] | select(. as $n | ($names | index($n)) == null)] | length) > 0
       then "order names an account that is not declared"
     else empty
+    end
     end
   ' "$CONFIG_FILE" 2>/dev/null
 }
@@ -270,8 +268,12 @@ load_config() {
     printf 'error: %s is malformed JSON\n' "$CONFIG_FILE" >&2
     exit 1
   fi
-  local err
-  err=$(config_schema_error)
+  local err rc=0
+  err=$(config_schema_error) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'error: %s could not be validated\n' "$CONFIG_FILE" >&2
+    exit 1
+  fi
   if [ -n "$err" ]; then
     printf 'error: %s - %s\n' "$CONFIG_FILE" "$err" >&2
     exit 1
@@ -328,7 +330,8 @@ account_order() {  # <vendor>
   field=$(account_store_field "$vendor") || return 1
   jq -r --arg v "$vendor" --arg f "$field" '
     ([.accounts[] | select(has($f)) | .name]) as $with_store |
-    ((.order[$v] // []) + ($with_store - (.order[$v] // []))) | .[]
+    (((.order[$v] // []) | map(select(. as $n | $with_store | index($n))))
+      + ($with_store - (.order[$v] // []))) | .[]
   ' "$CONFIG_FILE" 2>/dev/null || {
     printf 'error: %s could not be read\n' "$CONFIG_FILE" >&2
     exit 1
@@ -547,9 +550,9 @@ for name in "${CANDIDATES[@]}"; do
   verdict=
   if [ "$runway" = exhausted_now ]; then
     verdict="skipped:runway exhausted_now at $scope"
-  elif [ "$pct" -le 0 ] 2>/dev/null; then
+  elif awk -v p="$pct" 'BEGIN { exit !(p <= 0) }'; then
     verdict="skipped:0% remaining at $scope"
-  elif [ "$reserve" -gt 0 ] 2>/dev/null && [ "$pct" -lt "$reserve" ] 2>/dev/null; then
+  elif awk -v p="$pct" -v r="$reserve" 'BEGIN { exit !(r > 0 && p < r) }'; then
     verdict="skipped:$pct% remaining is below the $reserve% reserve"
   fi
   if [ -n "$verdict" ]; then
