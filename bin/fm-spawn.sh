@@ -2500,10 +2500,10 @@ account_chooser_field() {  # <chooser-output> <key>
 # account_pin_resolves_here <vendor> <name>
 #   True when THIS home's own config/crew-accounts.json declares <name> with a
 #   store for <vendor>. A secondmate home does not inherit that host-local file,
-#   so an account pin an inherited dispatch profile carries resolves nothing
-#   there and must not refuse the spawn; the home's own store wins instead. A
-#   file that exists but cannot be read or parsed is left for the chooser to
-#   report, so a genuinely broken home config is never silently ignored.
+#   so an --account pin it cannot resolve there must not refuse the spawn; the
+#   home's own pinned store wins instead. A file that exists but cannot be read
+#   or parsed is left for the chooser to report, so a genuinely broken home
+#   config is never silently ignored.
 account_pin_resolves_here() {  # <vendor> <name>
   local vendor=$1 name=$2 field resolved config_file
   config_file="$CONFIG/crew-accounts.json"

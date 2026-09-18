@@ -86,8 +86,7 @@ JSON
 }
 
 # unknown_json <provider> - the shape quota-axi prints for a store whose quota
-# cannot be read at all (an expired or rejected credential, verified live on
-# 2026-09-18 against a claude store answering 403).
+# cannot be read at all (an unreadable or rejected credential).
 unknown_json() {
   cat <<JSON
 {
@@ -122,20 +121,20 @@ write_default_config() {
 {
   "accounts": [
     {
-      "name": "lets-padel",
+      "name": "primary",
       "codex_home": "$STORE_A",
       "claude_config_dir": "$STORE_A"
     },
     {
-      "name": "karolina",
+      "name": "secondary",
       "codex_home": "$STORE_B",
       "claude_config_dir": "$STORE_B",
       "reserve": { "claude": 20 }
     }
   ],
   "order": {
-    "codex": ["lets-padel", "karolina"],
-    "claude": ["lets-padel", "karolina"]
+    "codex": ["primary", "secondary"],
+    "claude": ["primary", "secondary"]
   }
 }
 JSON
@@ -152,8 +151,8 @@ setup_case() {
   FAKEBIN="$FIXTURE/fake"
   QUOTA_LOG="$FIXTURE/quota.log"
   CONFIG="$FIXTURE/config/crew-accounts.json"
-  STORE_A="$FIXTURE/store-lets-padel"
-  STORE_B="$FIXTURE/store-karolina"
+  STORE_A="$FIXTURE/store-primary"
+  STORE_B="$FIXTURE/store-secondary"
   : > "$QUOTA_LOG"
   make_fake_quota "$FAKEBIN"
 }
@@ -167,14 +166,14 @@ field() {  # <output> <key>
 test_fill_first_over_the_configured_order() {
   local out status
   setup_case fill-first
-  write_store "$STORE_A" "$(quota_json codex 100 through_reset lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "a healthy first account should select"$'\n'"$out"
-  [ "$(field "$out" selected)" = lets-padel ] || fail "fill-first did not keep the first account: $out"
+  [ "$(field "$out" selected)" = primary ] || fail "fill-first did not keep the first account: $out"
   [ "$(field "$out" store)" = "$STORE_A" ] || fail "fill-first reported the wrong store: $out"
   pass "fill-first keeps the first account while it has measured headroom"
 }
@@ -182,31 +181,31 @@ test_fill_first_over_the_configured_order() {
 test_exhausted_first_account_overflows_to_the_second() {
   local out status
   setup_case exhausted-overflow
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "an exhausted first account should overflow to the second"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "exhausted account was not skipped: $out"
-  assert_contains "$out" "candidate=lets-padel" "skipped candidate was not reported"
+  [ "$(field "$out" selected)" = secondary ] || fail "exhausted account was not skipped: $out"
+  assert_contains "$out" "candidate=primary" "skipped candidate was not reported"
   assert_contains "$out" "skipped:runway exhausted_now at all_models" "skip reason was not reported: $out"
-  assert_contains "$out" "percent=92" "the selected account's measured percent was not reported: $out"
+  assert_contains "$out" "percent=87" "the selected account's measured percent was not reported: $out"
   pass "an exhausted first account overflows to the second on measured evidence"
 }
 
 test_zero_percent_first_account_overflows() {
   local out status
   setup_case zero-percent
-  write_store "$STORE_A" "$(quota_json codex 0 unknown lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 40 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 unknown primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 40 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "a 0 percent account should overflow"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "0 percent account was not skipped: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "0 percent account was not skipped: $out"
   assert_contains "$out" "skipped:0% remaining" "zero-percent skip reason was not reported: $out"
   pass "a measured 0 percent account overflows even without an exhausted_now runway"
 }
@@ -214,29 +213,29 @@ test_zero_percent_first_account_overflows() {
 test_reserve_floor_holds_the_colleagues_claude_account() {
   local out status
   setup_case reserve-floor
-  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 19 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 19 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 3 "$status" "a below-reserve account must not be selected"$'\n'"$out"
   assert_contains "$out" "skipped:19% remaining is below the 20% reserve" "reserve skip reason was not reported: $out"
-  assert_not_contains "$out" "selected=karolina" "a below-reserve account was selected"
+  assert_not_contains "$out" "selected=secondary" "a below-reserve account was selected"
   pass "the configured reserve is enforced before the colleague's account is used"
 }
 
 test_reserve_allows_the_colleagues_account_above_the_floor() {
   local out status store_env
   setup_case reserve-above
-  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 20 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 20 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 0 "$status" "an account exactly at its reserve stays usable"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "account at the reserve was not selected: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "account at the reserve was not selected: $out"
   store_env=$(field "$out" store_env)
   [ "$store_env" = CLAUDE_CONFIG_DIR ] || fail "wrong store variable for claude: $out"
   pass "an account exactly at its reserve is still selectable"
@@ -245,22 +244,22 @@ test_reserve_allows_the_colleagues_account_above_the_floor() {
 test_fractional_percent_and_reserve_still_hold_the_floor() {
   local out status
   setup_case reserve-fraction
-  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 19.5 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 19.5 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 3 "$status" "a measured percent below an integer reserve must be held"$'\n'"$out"
   assert_contains "$out" "skipped:19.5% remaining is below the 20% reserve" "the fractional percent bypassed the reserve: $out"
-  assert_not_contains "$out" "selected=karolina" "an account below the reserve was selected"
+  assert_not_contains "$out" "selected=secondary" "an account below the reserve was selected"
 
-  write_store "$STORE_B" "$(quota_json claude 25.4 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 25.4 through_reset secondary@example.com all_models)"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
-    { "name": "lets-padel", "claude_config_dir": "$STORE_A" },
-    { "name": "karolina", "claude_config_dir": "$STORE_B", "reserve": { "claude": 25.5 } }
+    { "name": "primary", "claude_config_dir": "$STORE_A" },
+    { "name": "secondary", "claude_config_dir": "$STORE_B", "reserve": { "claude": 25.5 } }
   ]
 }
 JSON
@@ -268,29 +267,29 @@ JSON
   status=$?
   expect_code 3 "$status" "a fractional reserve must still be enforced"$'\n'"$out"
   assert_contains "$out" "skipped:25.4% remaining is below the 25.5% reserve" "the fractional reserve was ignored: $out"
-  assert_not_contains "$out" "selected=karolina" "an account below a fractional reserve was selected"
+  assert_not_contains "$out" "selected=secondary" "an account below a fractional reserve was selected"
   pass "a fractional measured percent and a fractional reserve both hold the floor"
 }
 
 test_order_entry_without_a_vendor_store_is_not_a_candidate() {
   local out status
   setup_case order-wrong-vendor
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   mkdir -p "$FIXTURE/store-claude-only"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
     { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" },
-    { "name": "karolina", "codex_home": "$STORE_B" }
+    { "name": "secondary", "codex_home": "$STORE_B" }
   ],
-  "order": { "codex": ["claude-only", "karolina"] }
+  "order": { "codex": ["claude-only", "secondary"] }
 }
 JSON
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "an order entry with no store for the vendor must not be fatal"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "the usable account was not selected: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the usable account was not selected: $out"
   assert_not_contains "$out" "candidate=claude-only" "an account with no store for the vendor was a candidate: $out"
   pass "an order entry naming an account with no store for the vendor is skipped, not fatal"
 }
@@ -298,13 +297,13 @@ JSON
 test_top_level_reserve_is_refused() {
   local out status
   setup_case top-level-reserve
-  write_store "$STORE_A" "$(quota_json claude 90 through_reset lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 90 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 90 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 90 through_reset secondary@example.com all_models)"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
-    { "name": "lets-padel", "claude_config_dir": "$STORE_A" },
-    { "name": "karolina", "claude_config_dir": "$STORE_B" }
+    { "name": "primary", "claude_config_dir": "$STORE_A" },
+    { "name": "secondary", "claude_config_dir": "$STORE_B" }
   ],
   "reserve": { "claude": 20 }
 }
@@ -344,14 +343,14 @@ test_top_level_scalar_is_refused() {
 test_reserve_does_not_apply_to_codex() {
   local out status
   setup_case reserve-codex
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 19 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 19 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "codex has no reserve, so 19 percent is selectable"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "codex account below the claude reserve was skipped: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "codex account below the claude reserve was skipped: $out"
   pass "the reserve applies only to the vendor it names"
 }
 
@@ -359,13 +358,13 @@ test_unmeasurable_first_account_is_selected_as_disclosed_uncertainty() {
   local out status
   setup_case unmeasurable-first
   write_store "$STORE_A" "$(unknown_json claude)"
-  write_store "$STORE_B" "$(quota_json claude 72 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 64 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 0 "$status" "unmeasurable headroom must not block the first account"$'\n'"$out"
-  [ "$(field "$out" selected)" = lets-padel ] || fail "fill-first did not keep the unmeasurable first account: $out"
+  [ "$(field "$out" selected)" = primary ] || fail "fill-first did not keep the unmeasurable first account: $out"
   [ "$(field "$out" measured)" = no ] || fail "unmeasurable headroom was not disclosed: $out"
   [ "$(field "$out" identity)" = unknown ] || fail "an unknown identity should be reported as unknown: $out"
   assert_contains "$out" "selected:headroom unmeasurable (quota-axi reports no measurable window)" \
@@ -379,13 +378,13 @@ test_nonzero_quota_exit_still_reads_its_valid_snapshot() {
   # quota-axi 0.1.46 exits 1 for an error-state provider while still printing a
   # valid schema-5 snapshot; that snapshot is the evidence, not the exit status.
   write_store "$STORE_A" "$(unknown_json claude)" 1
-  write_store "$STORE_B" "$(quota_json claude 72 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 64 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 0 "$status" "a valid snapshot on a non-zero exit should still be evidence"$'\n'"$out"
-  [ "$(field "$out" selected)" = lets-padel ] || fail "the readable-but-error snapshot was treated as a dead account: $out"
+  [ "$(field "$out" selected)" = primary ] || fail "the readable-but-error snapshot was treated as a dead account: $out"
   assert_contains "$out" "selected:headroom unmeasurable (quota-axi reports no measurable window)" \
     "the error-state snapshot was not reported as unmeasurable: $out"
   pass "a valid snapshot on a non-zero quota-axi exit is evidence, not a failure"
@@ -395,13 +394,13 @@ test_unreadable_snapshot_is_disclosed_uncertainty() {
   local out status
   setup_case invalid-snapshot
   write_store "$STORE_A" 'not a quota snapshot'
-  write_store "$STORE_B" "$(quota_json claude 72 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 64 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
   expect_code 0 "$status" "an unparseable snapshot must not block dispatch"$'\n'"$out"
-  [ "$(field "$out" selected)" = lets-padel ] || fail "unparseable evidence did not fall back to fill-first: $out"
+  [ "$(field "$out" selected)" = primary ] || fail "unparseable evidence did not fall back to fill-first: $out"
   assert_contains "$out" "selected:headroom unmeasurable (quota-axi returned an invalid snapshot)" \
     "the invalid snapshot was not named as the reason: $out"
   pass "an unparseable snapshot is disclosed uncertainty rather than a block"
@@ -410,12 +409,12 @@ test_unreadable_snapshot_is_disclosed_uncertainty() {
 test_probe_reads_the_accounts_own_store_through_its_env_var() {
   local out log
   setup_case probe-store
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex) || fail "selection should succeed: $out"
-  [ "$(field "$out" selected)" = karolina ] || fail "expected the second account: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "expected the second account: $out"
   log=$(cat "$QUOTA_LOG")
   assert_contains "$log" "CODEX_HOME=$STORE_A" "the first account's own store was not probed: $log"
   assert_contains "$log" "CODEX_HOME=$STORE_B" "the second account's own store was not probed: $log"
@@ -427,14 +426,14 @@ test_probe_reads_the_accounts_own_store_through_its_env_var() {
 test_pin_overrides_exhaustion_and_the_reserve() {
   local out status log
   setup_case pin-override
-  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 5 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 5 through_reset secondary@example.com all_models)"
   write_default_config
 
-  out=$(choose --vendor claude --pin karolina)
+  out=$(choose --vendor claude --pin secondary)
   status=$?
   expect_code 0 "$status" "an explicit pin must not be refused"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "the pin did not select its account: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the pin did not select its account: $out"
   [ "$(field "$out" pin)" = yes ] || fail "the pin was not disclosed: $out"
   assert_contains "$out" "percent=5" "the pinned account's evidence was not reported: $out"
   log=$(cat "$QUOTA_LOG")
@@ -446,8 +445,8 @@ test_pin_overrides_exhaustion_and_the_reserve() {
 test_pin_of_an_undeclared_account_is_a_configuration_error() {
   local out status
   setup_case pin-unknown
-  write_store "$STORE_A" "$(quota_json claude 50 through_reset lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 50 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json claude 50 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 50 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude --pin nobody)
@@ -460,8 +459,8 @@ test_pin_of_an_undeclared_account_is_a_configuration_error() {
 test_pin_without_a_store_for_the_vendor_is_refused() {
   local out status
   setup_case pin-wrong-vendor
-  write_store "$STORE_A" "$(quota_json codex 50 through_reset lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 50 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 50 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 50 through_reset secondary@example.com all_models)"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
@@ -480,14 +479,14 @@ JSON
 test_optional_pin_falls_through_to_automatic_selection() {
   local out status
   setup_case pin-optional
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   mkdir -p "$FIXTURE/store-claude-only"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
-    { "name": "lets-padel", "codex_home": "$STORE_A" },
-    { "name": "karolina", "codex_home": "$STORE_B" },
+    { "name": "primary", "codex_home": "$STORE_A" },
+    { "name": "secondary", "codex_home": "$STORE_B" },
     { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" }
   ]
 }
@@ -496,7 +495,7 @@ JSON
   out=$(choose --vendor codex --pin claude-only --pin-optional)
   status=$?
   expect_code 0 "$status" "an optional pin without this vendor's store must fall through"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "optional pin did not fall through to selection: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "optional pin did not fall through to selection: $out"
   [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was still reported as the pin: $out"
   pass "an optional pin falls through where the account declares no store for the vendor"
 }
@@ -504,17 +503,17 @@ JSON
 test_no_eligible_account_refuses_with_evidence() {
   local out status
   setup_case none-eligible
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 0 unknown karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 0 unknown secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 3 "$status" "every account being exhausted must refuse"$'\n'"$out"
-  assert_not_contains "$out" "selected=lets-padel" "an exhausted account was selected"
-  assert_not_contains "$out" "selected=karolina" "an exhausted account was selected"
-  assert_contains "$out" "candidate=lets-padel" "the refusal did not report its evidence: $out"
-  assert_contains "$out" "candidate=karolina" "the refusal did not report its evidence: $out"
+  assert_not_contains "$out" "selected=primary" "an exhausted account was selected"
+  assert_not_contains "$out" "selected=secondary" "an exhausted account was selected"
+  assert_contains "$out" "candidate=primary" "the refusal did not report its evidence: $out"
+  assert_contains "$out" "candidate=secondary" "the refusal did not report its evidence: $out"
   pass "all accounts exhausted refuses the selection with its evidence"
 }
 
@@ -531,17 +530,17 @@ test_no_config_selects_nothing() {
 
   # A pin is an explicit decision, so it must never be silently dropped for want
   # of a file to resolve it against.
-  out=$(choose --vendor codex --pin karolina)
+  out=$(choose --vendor codex --pin secondary)
   status=$?
   expect_code 1 "$status" "a pin with no config must be refused"$'\n'"$out"
-  assert_contains "$out" "is missing, so --pin karolina cannot be resolved" "the refusal did not name the pin: $out"
+  assert_contains "$out" "is missing, so --pin secondary cannot be resolved" "the refusal did not name the pin: $out"
   pass "no account config means no selection, and a pin without one is refused"
 }
 
 test_vendor_with_no_configured_account_selects_nothing() {
   local out status
   setup_case vendor-uncovered
-  write_store "$STORE_A" "$(quota_json codex 50 through_reset lets@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 50 through_reset primary@example.com all_models)"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
@@ -561,30 +560,30 @@ JSON
 test_declaration_order_covers_accounts_the_order_list_omits() {
   local out status
   setup_case order-omitted
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
-    { "name": "lets-padel", "codex_home": "$STORE_A" },
-    { "name": "karolina", "codex_home": "$STORE_B" }
+    { "name": "primary", "codex_home": "$STORE_A" },
+    { "name": "secondary", "codex_home": "$STORE_B" }
   ],
-  "order": { "codex": ["karolina"] }
+  "order": { "codex": ["secondary"] }
 }
 JSON
 
   out=$(choose --vendor codex)
   status=$?
   expect_code 0 "$status" "the listed account should be considered first"$'\n'"$out"
-  [ "$(field "$out" selected)" = karolina ] || fail "the order list was not honored first: $out"
-  assert_contains "$out" "candidate=lets-padel" "an account the order list omits was dropped entirely: $out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the order list was not honored first: $out"
+  assert_contains "$out" "candidate=primary" "an account the order list omits was dropped entirely: $out"
   pass "accounts the order list omits still follow it in declaration order"
 }
 
 test_missing_store_directory_is_a_configuration_error() {
   local out status
   setup_case missing-store
-  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   # The first account's store directory is deliberately absent.
   rm -rf "$STORE_A"
   write_default_config
@@ -592,7 +591,7 @@ test_missing_store_directory_is_a_configuration_error() {
   out=$(choose --vendor codex)
   status=$?
   expect_code 1 "$status" "a missing store directory must be refused"$'\n'"$out"
-  assert_contains "$out" "account lets-padel codex_home is not an existing directory" \
+  assert_contains "$out" "account primary codex_home is not an existing directory" \
     "the refusal did not name the account and field: $out"
   pass "a configured store that is not an existing directory refuses the spawn"
 }
@@ -654,8 +653,8 @@ test_malformed_config_is_refused() {
 test_validate_checks_the_whole_file() {
   local out status
   setup_case validate
-  write_store "$STORE_A" "$(quota_json codex 10 through_reset lets@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json claude 10 through_reset karolina@example.com all_models)"
+  write_store "$STORE_A" "$(quota_json codex 10 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 10 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --validate)
@@ -667,7 +666,7 @@ test_validate_checks_the_whole_file() {
   out=$(choose --validate)
   status=$?
   expect_code 1 "$status" "a missing store must fail validation"$'\n'"$out"
-  assert_contains "$out" "account karolina" "validation did not name the failing account: $out"
+  assert_contains "$out" "account secondary" "validation did not name the failing account: $out"
 
   write_default_config
   rm -f "$CONFIG"
@@ -681,11 +680,11 @@ test_home_relative_store_paths_expand() {
   local out status
   setup_case home-relative
   mkdir -p "$FIXTURE/home/.claude"
-  write_store "$FIXTURE/home/.claude" "$(quota_json claude 55 through_reset lets@example.com all_models)"
+  write_store "$FIXTURE/home/.claude" "$(quota_json claude 55 through_reset primary@example.com all_models)"
   cat > "$CONFIG" <<'JSON'
 {
   "accounts": [
-    { "name": "lets-padel", "claude_config_dir": "~/.claude" }
+    { "name": "primary", "claude_config_dir": "~/.claude" }
   ]
 }
 JSON

@@ -1,19 +1,19 @@
 {
   "accounts": [
     {
-      "name": "lets-padel",
-      "codex_home": "/home/me/.codex-lets-padel",
+      "name": "primary",
+      "codex_home": "/home/me/.codex-primary",
       "claude_config_dir": "/home/me/.claude"
     },
     {
-      "name": "karolina",
-      "codex_home": "/home/me/.codex-karolina",
-      "claude_config_dir": "/home/me/.claude-karolina",
+      "name": "secondary",
+      "codex_home": "/home/me/.codex-secondary",
+      "claude_config_dir": "/home/me/.claude-secondary",
       "reserve": { "claude": 20 }
     }
   ],
   "order": {
-    "codex": ["lets-padel", "karolina"],
-    "claude": ["lets-padel", "karolina"]
+    "codex": ["primary", "secondary"],
+    "claude": ["primary", "secondary"]
   }
 }

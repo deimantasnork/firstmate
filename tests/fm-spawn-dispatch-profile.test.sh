@@ -1087,20 +1087,20 @@ test_batch_forwards_shared_account_pin() {
   claude_a="$CASE_DIR/store-claude-a"
   claude_b="$CASE_DIR/store-claude-b"
   write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
-  write_account_store "$codex_b" "$(account_store_json codex 92 through_reset)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
   write_account_store "$claude_a" "$(account_store_json claude 50 through_reset)"
   write_account_store "$claude_b" "$(account_store_json claude 50 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
 
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --account karolina)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --account secondary)
   status=$?
   expect_code 0 "$status" "a batch with a shared account pin should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the batch dropped the shared account pin"
   for meta in "$HOME_DIR/state/$id1.meta" "$HOME_DIR/state/$id2.meta"; do
-    assert_grep "account=karolina" "$meta" "the batch pin was not recorded on $meta"
+    assert_grep "account=secondary" "$meta" "the batch pin was not recorded on $meta"
     assert_grep "account_pin=yes" "$meta" "the batch pin was not recorded as an explicit pin on $meta"
   done
   pass "batch dispatch forwards a shared --account pin to every pair"
@@ -1918,10 +1918,10 @@ write_accounts_config() {  # <home> <codex-a> <codex-b> <claude-a> <claude-b>
   cat > "$1/config/crew-accounts.json" <<JSON
 {
   "accounts": [
-    { "name": "lets-padel", "codex_home": "$2", "claude_config_dir": "$4" },
-    { "name": "karolina", "codex_home": "$3", "claude_config_dir": "$5", "reserve": { "claude": 20 } }
+    { "name": "primary", "codex_home": "$2", "claude_config_dir": "$4" },
+    { "name": "secondary", "codex_home": "$3", "claude_config_dir": "$5", "reserve": { "claude": 20 } }
   ],
-  "order": { "codex": ["lets-padel", "karolina"], "claude": ["lets-padel", "karolina"] }
+  "order": { "codex": ["primary", "secondary"], "claude": ["primary", "secondary"] }
 }
 JSON
 }
@@ -1946,7 +1946,7 @@ test_a_pin_needs_a_selection_capable_harness() {
   # grok reads no store this home can select, so the pin must be refused rather
   # than silently dropped.
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
   status=$?
   expect_code 1 "$status" "a pin on a harness with no selectable store must refuse"$'\n'"$out"
   assert_contains "$out" "--account applies only to codex and claude spawns" "the refusal did not explain the scope: $out"
@@ -1954,7 +1954,7 @@ test_a_pin_needs_a_selection_capable_harness() {
 
   # A raw launch command cannot be resolved to a vendor at all.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --account karolina 'env -u CURSOR_AGENT my-agent --go')
+    --account secondary 'env -u CURSOR_AGENT my-agent --go')
   status=$?
   expect_code 1 "$status" "a pin on a raw launch command must refuse"$'\n'"$out"
   assert_contains "$out" "--account needs a resolved harness" "the raw-launch refusal did not explain itself: $out"
@@ -1971,7 +1971,7 @@ test_codex_spawn_forwards_the_selected_account_store() {
   claude_a="$CASE_DIR/store-claude-a"
   claude_b="$CASE_DIR/store-claude-b"
   write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
-  write_account_store "$codex_b" "$(account_store_json codex 92 through_reset)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
   write_account_store "$claude_a" "$(account_store_json claude 80 through_reset)"
   write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
@@ -1984,9 +1984,9 @@ test_codex_spawn_forwards_the_selected_account_store() {
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the selected account's store was not forwarded"
   assert_not_contains "$launch" "$codex_a" "the exhausted account's store was forwarded anyway"
   meta="$HOME_DIR/state/$id.meta"
-  assert_grep "account=karolina" "$meta" "the chosen account was not recorded on the task record"
+  assert_grep "account=secondary" "$meta" "the chosen account was not recorded on the task record"
   assert_no_grep "account_pin=" "$meta" "an automatic choice was recorded as an explicit pin"
-  assert_contains "$out" "account: vendor=codex account=karolina" "the spawn did not report its account evidence"
+  assert_contains "$out" "account: vendor=codex account=secondary" "the spawn did not report its account evidence"
   pass "a codex spawn forwards and records the account selected for it"
 }
 
@@ -2017,7 +2017,7 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_a'" "the selected account's store was not forwarded"
   assert_not_contains "$launch" "$ambient" "the ambient store beat the per-dispatch selection"
   meta="$HOME_DIR/state/$id.meta"
-  assert_grep "account=lets-padel" "$meta" "the chosen account was not recorded on the task record"
+  assert_grep "account=primary" "$meta" "the chosen account was not recorded on the task record"
   pass "a claude spawn selects per dispatch, ahead of an ambient store"
 }
 
@@ -2040,14 +2040,14 @@ test_explicit_account_pin_is_forwarded_and_recorded() {
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
 
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
   status=$?
   expect_code 0 "$status" "an explicit --account pin must be honored"$'
 '"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_b'" "the pinned account's store was not forwarded"
   meta="$HOME_DIR/state/$id.meta"
-  assert_grep "account=karolina" "$meta" "the pinned account was not recorded"
+  assert_grep "account=secondary" "$meta" "the pinned account was not recorded"
   assert_grep "account_pin=yes" "$meta" "the explicit pin was not recorded as one"
   pass "an explicit --account pin is forwarded and recorded as a pin"
 }
@@ -2095,7 +2095,7 @@ test_secondmate_home_stays_on_its_own_stores() {
   claude_a="$CASE_DIR/store-claude-a"
   claude_b="$CASE_DIR/store-claude-b"
   write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
-  write_account_store "$codex_b" "$(account_store_json codex 92 through_reset)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
   write_account_store "$claude_a" "$(account_store_json claude 80 through_reset)"
   write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
@@ -2112,7 +2112,7 @@ test_secondmate_home_stays_on_its_own_stores() {
 
   # An explicit pin is still firstmate's or the captain's decision, so it wins.
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
   status=$?
   expect_code 0 "$status" "an explicit pin must still work inside a secondmate home"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
@@ -2126,19 +2126,19 @@ test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve() {
   rec=$(make_spawn_case account-secondmate-unresolved codex "$id")
   read_case_record "$rec"
   # This home IS a secondmate home and purposely carries no host-local account
-  # file, exactly like a home whose primary inherited only crew-dispatch.json.
+  # file to resolve the pin against.
   printf '%s\n' "$id" > "$HOME_DIR/.fm-secondmate-home"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
 
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
   status=$?
-  expect_code 0 "$status" "an inherited pin a secondmate home cannot resolve must not refuse the spawn"$'\n'"$out"
-  assert_contains "$out" "cannot resolve --account karolina" "the ignored pin was not disclosed: $out"
+  expect_code 0 "$status" "a pin a secondmate home cannot resolve must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "cannot resolve --account secondary" "the ignored pin was not disclosed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CODEX_HOME" "an unresolved inherited pin selected a store anyway"
+  assert_not_contains "$launch" "CODEX_HOME" "an unresolved pin selected a store anyway"
   meta="$HOME_DIR/state/$id.meta"
-  assert_no_grep "account=" "$meta" "an unresolved inherited pin was recorded on the task record"
+  assert_no_grep "account=" "$meta" "an unresolved pin was recorded on the task record"
   [ ! -s "$CASE_DIR/quota.log" ] || fail "an unresolved pin still probed the account stores"
 
   # A home with its own file still ignores a pin that file does not declare.
@@ -2153,10 +2153,10 @@ test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve() {
 }
 JSON
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account secondary)
   status=$?
   expect_code 0 "$status" "a home-local pin that resolves no store for the home must not refuse the spawn"$'\n'"$out"
-  assert_contains "$out" "cannot resolve --account karolina" "the unresolved home-local pin was not disclosed: $out"
+  assert_contains "$out" "cannot resolve --account secondary" "the unresolved home-local pin was not disclosed: $out"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CODEX_HOME" "a pin the home does not declare selected a store anyway"
   [ ! -s "$CASE_DIR/quota.log" ] || fail "an undeclared pin still probed the account stores"
@@ -2176,7 +2176,7 @@ test_secondmate_spawn_records_one_store_per_vendor() {
   claude_a="$CASE_DIR/store-claude-a"
   claude_b="$CASE_DIR/store-claude-b"
   write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
-  write_account_store "$codex_b" "$(account_store_json codex 92 through_reset)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
   write_account_store "$claude_a" "$(account_store_json claude 70 through_reset)"
   write_account_store "$claude_b" "$(account_store_json claude 90 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
@@ -2191,9 +2191,9 @@ test_secondmate_spawn_records_one_store_per_vendor() {
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the secondmate's codex store was not forwarded"
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_a'" "the secondmate's claude store was not forwarded"
   meta="$HOME_DIR/state/$id.meta"
-  assert_grep "account_codex=karolina" "$meta" "the home's codex account was not recorded"
+  assert_grep "account_codex=secondary" "$meta" "the home's codex account was not recorded"
   assert_grep "codex_home=$codex_b" "$meta" "the home's codex store was not recorded"
-  assert_grep "account_claude=lets-padel" "$meta" "the home's claude account was not recorded"
+  assert_grep "account_claude=primary" "$meta" "the home's claude account was not recorded"
   assert_grep "claude_config_dir=$claude_a" "$meta" "the home's claude store was not recorded"
   pass "a secondmate spawn records and forwards one store per vendor"
 }
