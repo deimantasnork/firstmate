@@ -2478,13 +2478,13 @@ account_chooser_field() {  # <chooser-output> <key>
 
 # account_pin_resolves_here <vendor> <name>
 #   True when THIS home's own config/crew-accounts.json declares <name> with a
-#   store for <vendor>. A secondmate home does not inherit that host-local file,
-#   so an --account pin it cannot resolve there must not refuse the spawn; the
-#   home's own pinned store wins instead. A file that exists but cannot be read
-#   or parsed is left for the chooser to report, so a genuinely broken home
-#   config is never silently ignored.
+#   store for <vendor> that resolves to an existing directory. A secondmate home
+#   does not inherit that host-local file, so an --account pin it cannot resolve
+#   there must not refuse the spawn; the home's own pinned store wins instead. A
+#   file that exists but cannot be read or parsed is left for the chooser to
+#   report, so a genuinely broken home config is never silently ignored.
 account_pin_resolves_here() {  # <vendor> <name>
-  local vendor=$1 name=$2 field resolved config_file
+  local vendor=$1 name=$2 field raw resolved config_file
   config_file="$CONFIG/crew-accounts.json"
   [ -e "$config_file" ] || [ -L "$config_file" ] || return 1
   case "$vendor" in
@@ -2492,11 +2492,22 @@ account_pin_resolves_here() {  # <vendor> <name>
   claude) field=claude_config_dir ;;
   *) return 1 ;;
   esac
-  resolved=$(jq -r --arg n "$name" --arg f "$field" '
-    [.accounts[]? | select(type == "object" and .name == $n
-      and (.[$f] | type) == "string" and (.[$f] | length) > 0)] | length > 0
+  raw=$(jq -r --arg n "$name" --arg f "$field" '
+    [.accounts[]? | select(type == "object" and .name == $n)
+      | select((.[$f] | type) == "string" and (.[$f] | length) > 0) | .[$f]]
+    | first // empty
   ' "$config_file" 2>/dev/null) || return 0
-  [ "$resolved" = true ]
+  [ -n "$raw" ] || return 1
+  if [ "$raw" = '~' ]; then
+    resolved=${HOME:-}
+  elif [ "${raw:0:2}" = "$(printf '~')/" ]; then
+    resolved="${HOME:-}${raw:1}"
+  elif [ "${raw:0:1}" = '/' ]; then
+    resolved=$raw
+  else
+    return 0
+  fi
+  [ -d "$resolved" ]
 }
 
 # account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1>

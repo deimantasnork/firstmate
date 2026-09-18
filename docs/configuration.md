@@ -1101,37 +1101,33 @@ The file holds absolute store paths, so it is host-local and is deliberately NOT
       "claude_config_dir": "/home/me/.claude-secondary",
       "reserve": { "claude": 20 }
     }
-  ],
-  "order": {
-    "codex": ["primary", "secondary"],
-    "claude": ["primary", "secondary"]
-  }
+  ]
 }
 ```
 
 `accounts` is required and non-empty.
 Each entry needs a unique `name` matching `^[a-z0-9][a-z0-9._-]*$`, one or both of `codex_home` and `claude_config_dir`, and may carry an optional per-vendor `reserve`.
 A store path is absolute or starts with `~/`, carries no control character, and must be an existing directory when it is used; a violation is a configuration error, reported at session start and refused at spawn rather than selected around.
-`reserve` maps `codex` and/or `claude` to a percentage from 0 through 100, and that account is not chosen for that vendor while its own measured effective remaining percent is below that reserve.
-`order` is optional and maps each vendor to the fill-first account order; an account the list omits follows the listed ones in declaration order, so adding an account never silently excludes it.
-Absent `order` means declaration order, and an absent file means every spawn keeps today's single-store behavior.
+`reserve` maps `codex` and/or `claude` to a percentage from 0 through 100, and that account is not chosen automatically for that vendor while its own measured effective remaining percent is at or below that reserve.
+Each vendor evaluates the accounts in declaration order, skipping any account that declares no store for that vendor, so adding an account never silently excludes it.
+An absent file means every spawn keeps today's single-store behavior.
 
 Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single owner:
 
 - The candidates are that vendor's accounts in order, and each is measured by one `quota-axi --provider <vendor> --profile-only --json` read with that account's own store in `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the evidence is per account rather than ambient and nothing is refreshed or written.
-- An account is disqualified only on measured evidence: an `exhausted_now` runway, a known 0 percent, or a known percent below its own reserve.
+- An account is disqualified only on measured evidence: an `exhausted_now` runway, a known 0 percent, or a known percent at or below its own reserve.
 - Unmeasurable headroom - a store `quota-axi` cannot read, including an expired access token that only a real vendor call would refresh - is disclosed uncertainty and never a block, so such an account stays selectable and is reported as `measured=no`.
-- The first account that is not measurably disqualified is chosen, so an earlier account is drained down to its reserve before the next one is touched.
+- The first account that is not measurably disqualified is chosen, so an earlier account is drained down toward its reserve before the next one is touched.
 - When every account for that vendor is measurably disqualified the spawn refuses and prints the candidate evidence; an explicit pin still selects one.
 
 `fm-spawn.sh` forwards the chosen store onto that launch as `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the choice is per dispatch rather than ambient, and records it on the task record as `account=`.
 A pre-set store is forwarded only when this home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
 
 `--account <name>` pins one account for that task.
-A pin is an explicit decision, so it bypasses the order, the reserve, and the exhaustion check, and its own evidence is still reported.
+A pin is an explicit decision, so it bypasses the fill-first order, the reserve, and the exhaustion check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
 A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
-An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with a store for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
+An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with an existing store directory for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)

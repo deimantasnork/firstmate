@@ -131,11 +131,7 @@ write_default_config() {
       "claude_config_dir": "$STORE_B",
       "reserve": { "claude": 20 }
     }
-  ],
-  "order": {
-    "codex": ["primary", "secondary"],
-    "claude": ["primary", "secondary"]
-  }
+  ]
 }
 JSON
 }
@@ -163,7 +159,7 @@ field() {  # <output> <key>
 
 # --- cases ------------------------------------------------------------------
 
-test_fill_first_over_the_configured_order() {
+test_fill_first_over_declaration_order() {
   local out status
   setup_case fill-first
   write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
@@ -220,25 +216,31 @@ test_reserve_floor_holds_the_colleagues_claude_account() {
   out=$(choose --vendor claude)
   status=$?
   expect_code 3 "$status" "a below-reserve account must not be selected"$'\n'"$out"
-  assert_contains "$out" "skipped:19% remaining is below the 20% reserve" "reserve skip reason was not reported: $out"
+  assert_contains "$out" "skipped:19% remaining is at or below the 20% reserve" "reserve skip reason was not reported: $out"
   assert_not_contains "$out" "selected=secondary" "a below-reserve account was selected"
   pass "the configured reserve is enforced before the colleague's account is used"
 }
 
-test_reserve_allows_the_colleagues_account_above_the_floor() {
+test_reserve_floor_holds_at_the_boundary_and_a_pin_still_selects() {
   local out status store_env
-  setup_case reserve-above
+  setup_case reserve-boundary
   write_store "$STORE_A" "$(quota_json claude 0 exhausted_now primary@example.com all_models)"
   write_store "$STORE_B" "$(quota_json claude 20 through_reset secondary@example.com all_models)"
   write_default_config
 
   out=$(choose --vendor claude)
   status=$?
-  expect_code 0 "$status" "an account exactly at its reserve stays usable"$'\n'"$out"
-  [ "$(field "$out" selected)" = secondary ] || fail "account at the reserve was not selected: $out"
+  expect_code 3 "$status" "an account exactly at its reserve must not be auto-selected"$'\n'"$out"
+  assert_contains "$out" "skipped:20% remaining is at or below the 20% reserve" "the reserve floor itself was not held: $out"
+  assert_not_contains "$out" "selected=secondary" "an account exactly at the reserve was auto-selected"
+
+  out=$(choose --vendor claude --pin secondary)
+  status=$?
+  expect_code 0 "$status" "an explicit pin must still select the account at its reserve"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the pin did not select the boundary account: $out"
   store_env=$(field "$out" store_env)
   [ "$store_env" = CLAUDE_CONFIG_DIR ] || fail "wrong store variable for claude: $out"
-  pass "an account exactly at its reserve is still selectable"
+  pass "the reserve floor itself is not auto-selectable, and an explicit pin still selects it"
 }
 
 test_fractional_percent_and_reserve_still_hold_the_floor() {
@@ -251,7 +253,7 @@ test_fractional_percent_and_reserve_still_hold_the_floor() {
   out=$(choose --vendor claude)
   status=$?
   expect_code 3 "$status" "a measured percent below an integer reserve must be held"$'\n'"$out"
-  assert_contains "$out" "skipped:19.5% remaining is below the 20% reserve" "the fractional percent bypassed the reserve: $out"
+  assert_contains "$out" "skipped:19.5% remaining is at or below the 20% reserve" "the fractional percent bypassed the reserve: $out"
   assert_not_contains "$out" "selected=secondary" "an account below the reserve was selected"
 
   write_store "$STORE_B" "$(quota_json claude 25.4 through_reset secondary@example.com all_models)"
@@ -266,14 +268,14 @@ JSON
   out=$(choose --vendor claude)
   status=$?
   expect_code 3 "$status" "a fractional reserve must still be enforced"$'\n'"$out"
-  assert_contains "$out" "skipped:25.4% remaining is below the 25.5% reserve" "the fractional reserve was ignored: $out"
+  assert_contains "$out" "skipped:25.4% remaining is at or below the 25.5% reserve" "the fractional reserve was ignored: $out"
   assert_not_contains "$out" "selected=secondary" "an account below a fractional reserve was selected"
   pass "a fractional measured percent and a fractional reserve both hold the floor"
 }
 
-test_order_entry_without_a_vendor_store_is_not_a_candidate() {
+test_account_without_a_vendor_store_is_not_a_candidate() {
   local out status
-  setup_case order-wrong-vendor
+  setup_case vendor-store-missing
   write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
   mkdir -p "$FIXTURE/store-claude-only"
   cat > "$CONFIG" <<JSON
@@ -281,17 +283,16 @@ test_order_entry_without_a_vendor_store_is_not_a_candidate() {
   "accounts": [
     { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" },
     { "name": "secondary", "codex_home": "$STORE_B" }
-  ],
-  "order": { "codex": ["claude-only", "secondary"] }
+  ]
 }
 JSON
 
   out=$(choose --vendor codex)
   status=$?
-  expect_code 0 "$status" "an order entry with no store for the vendor must not be fatal"$'\n'"$out"
+  expect_code 0 "$status" "an account with no store for the vendor must not be fatal"$'\n'"$out"
   [ "$(field "$out" selected)" = secondary ] || fail "the usable account was not selected: $out"
   assert_not_contains "$out" "candidate=claude-only" "an account with no store for the vendor was a candidate: $out"
-  pass "an order entry naming an account with no store for the vendor is skipped, not fatal"
+  pass "an account with no store for the vendor is skipped, not fatal"
 }
 
 test_top_level_reserve_is_refused() {
@@ -557,29 +558,6 @@ JSON
   pass "a vendor with no configured account selects nothing"
 }
 
-test_declaration_order_covers_accounts_the_order_list_omits() {
-  local out status
-  setup_case order-omitted
-  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
-  cat > "$CONFIG" <<JSON
-{
-  "accounts": [
-    { "name": "primary", "codex_home": "$STORE_A" },
-    { "name": "secondary", "codex_home": "$STORE_B" }
-  ],
-  "order": { "codex": ["secondary"] }
-}
-JSON
-
-  out=$(choose --vendor codex)
-  status=$?
-  expect_code 0 "$status" "the listed account should be considered first"$'\n'"$out"
-  [ "$(field "$out" selected)" = secondary ] || fail "the order list was not honored first: $out"
-  assert_contains "$out" "candidate=primary" "an account the order list omits was dropped entirely: $out"
-  pass "accounts the order list omits still follow it in declaration order"
-}
-
 test_missing_store_directory_is_a_configuration_error() {
   local out status
   setup_case missing-store
@@ -617,18 +595,6 @@ test_malformed_config_is_refused() {
   status=$?
   expect_code 1 "$status" "duplicate account names must be refused"$'\n'"$out"
   assert_contains "$out" "account names must be unique" "the schema error was not reported: $out"
-
-  printf '%s\n' '{"accounts":[{"name":"a","codex_home":"/tmp"}],"order":{"grok":["a"]}}' > "$CONFIG"
-  out=$(choose --vendor codex)
-  status=$?
-  expect_code 1 "$status" "an unknown order vendor must be refused"$'\n'"$out"
-  assert_contains "$out" "order names a vendor other than codex or claude" "the schema error was not reported: $out"
-
-  printf '%s\n' '{"accounts":[{"name":"a","codex_home":"/tmp"}],"order":{"codex":["b"]}}' > "$CONFIG"
-  out=$(choose --vendor codex)
-  status=$?
-  expect_code 1 "$status" "an order entry naming an undeclared account must be refused"$'\n'"$out"
-  assert_contains "$out" "order names an account that is not declared" "the schema error was not reported: $out"
 
   printf '%s\n' '{"accounts":"hello"}' > "$CONFIG"
   out=$(choose --vendor codex)
@@ -716,12 +682,12 @@ test_usage_errors() {
 
 # --- runner -----------------------------------------------------------------
 
-test_fill_first_over_the_configured_order
+test_fill_first_over_declaration_order
 test_exhausted_first_account_overflows_to_the_second
 test_zero_percent_first_account_overflows
 test_reserve_floor_holds_the_colleagues_claude_account
 test_fractional_percent_and_reserve_still_hold_the_floor
-test_reserve_allows_the_colleagues_account_above_the_floor
+test_reserve_floor_holds_at_the_boundary_and_a_pin_still_selects
 test_reserve_does_not_apply_to_codex
 test_unmeasurable_first_account_is_selected_as_disclosed_uncertainty
 test_nonzero_quota_exit_still_reads_its_valid_snapshot
@@ -734,8 +700,7 @@ test_optional_pin_falls_through_to_automatic_selection
 test_no_eligible_account_refuses_with_evidence
 test_no_config_selects_nothing
 test_vendor_with_no_configured_account_selects_nothing
-test_declaration_order_covers_accounts_the_order_list_omits
-test_order_entry_without_a_vendor_store_is_not_a_candidate
+test_account_without_a_vendor_store_is_not_a_candidate
 test_top_level_reserve_is_refused
 test_top_level_scalar_is_refused
 test_missing_store_directory_is_a_configuration_error

@@ -14,13 +14,13 @@
 # CODEX_HOME or CLAUDE_CONFIG_DIR. It never launches anything and never writes a
 # credential file.
 #
-# Selection is fill-first over the configured order (the vendor's `order` list,
-# then any account it omits in declaration order): the first account whose own
-# measured evidence does not disqualify it is chosen, so an earlier account is
-# drained right down to its reserve before the next one is touched. An account
-# is disqualified only on measured evidence: a runway of `exhausted_now`, a
-# known effective remaining percent of zero, or a known percent below that
-# account's configured reserve for the vendor. Unmeasurable headroom - a store
+# Selection is fill-first over the accounts' declaration order: the first
+# account declaring a store for this vendor whose own measured evidence does not
+# disqualify it is chosen, so an earlier account is drained down toward its
+# reserve before the next one is touched. An account is disqualified only on
+# measured evidence: a runway of `exhausted_now`, a known effective remaining
+# percent of zero, or a known percent at or below that account's configured
+# reserve for the vendor. Unmeasurable headroom - a store
 # quota-axi cannot read at all, including an expired access token that only a
 # real vendor call would refresh - is disclosed uncertainty, never a block, so
 # such an account stays selectable and is reported as `measured=no`.
@@ -232,17 +232,6 @@ config_schema_error() {
       then "account reserve names a vendor other than codex or claude"
     elif ([$accounts[] | .reserve // {} | to_entries[] | select((.value | type) != "number" or .value < 0 or .value > 100)] | length) > 0
       then "each account reserve must be a number from 0 through 100"
-    elif has("order") and ((.order | type) != "object") then "order must be an object keyed by vendor"
-    elif has("order") and ([.order | keys[] | select(. as $k | (vendors | index($k)) == null)] | length) > 0
-      then "order names a vendor other than codex or claude"
-    elif has("order") and ([.order | to_entries[] | select((.value | type) != "array" or (.value | length) == 0)] | length) > 0
-      then "each order list must be a non-empty array of account names"
-    elif has("order") and ([.order | to_entries[] | .value[] | select(type != "string")] | length) > 0
-      then "each order list must be a non-empty array of account names"
-    elif has("order") and any(.order | to_entries[]; (.value | length) != (.value | unique | length))
-      then "an order list must not repeat an account"
-    elif has("order") and ([.order | to_entries[] | .value[] | select(. as $n | ($names | index($n)) == null)] | length) > 0
-      then "order names an account that is not declared"
     else empty
     end
     end
@@ -323,15 +312,12 @@ account_reserve() {  # <account-name> <vendor>
   ' "$CONFIG_FILE"
 }
 
-# Every account declaring a store for <vendor>, in fill-first order: the
-# vendor's order list first, then any declared account that list omits.
-account_order() {  # <vendor>
+# Every account declaring a store for <vendor>, in declaration order.
+account_candidates() {  # <vendor>
   local vendor=$1 field
   field=$(account_store_field "$vendor") || return 1
-  jq -r --arg v "$vendor" --arg f "$field" '
-    ([.accounts[] | select(has($f)) | .name]) as $with_store |
-    (((.order[$v] // []) | map(select(. as $n | $with_store | index($n))))
-      + ($with_store - (.order[$v] // []))) | .[]
+  jq -r --arg f "$field" '
+    .accounts[] | select(has($f)) | .name
   ' "$CONFIG_FILE" 2>/dev/null || {
     printf 'error: %s could not be read\n' "$CONFIG_FILE" >&2
     exit 1
@@ -502,7 +488,7 @@ if [ -n "$PIN" ]; then
   exit 0
 fi
 
-CANDIDATE_ORDER=$(account_order "$VENDOR") || exit 1
+CANDIDATE_ORDER=$(account_candidates "$VENDOR") || exit 1
 CANDIDATES=()
 while IFS= read -r name; do
   [ -n "$name" ] || continue
@@ -552,8 +538,8 @@ for name in "${CANDIDATES[@]}"; do
     verdict="skipped:runway exhausted_now at $scope"
   elif awk -v p="$pct" 'BEGIN { exit !(p <= 0) }'; then
     verdict="skipped:0% remaining at $scope"
-  elif awk -v p="$pct" -v r="$reserve" 'BEGIN { exit !(r > 0 && p < r) }'; then
-    verdict="skipped:$pct% remaining is below the $reserve% reserve"
+  elif awk -v p="$pct" -v r="$reserve" 'BEGIN { exit !(r > 0 && p <= r) }'; then
+    verdict="skipped:$pct% remaining is at or below the $reserve% reserve"
   fi
   if [ -n "$verdict" ]; then
     CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=%s percent=%s runway=%s -> %s' "$name" "$store" "$measured" "$pct" "$runway" "$verdict")")

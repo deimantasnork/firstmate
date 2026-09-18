@@ -11,9 +11,5 @@
       "claude_config_dir": "/home/me/.claude-secondary",
       "reserve": { "claude": 20 }
     }
-  ],
-  "order": {
-    "codex": ["primary", "secondary"],
-    "claude": ["primary", "secondary"]
-  }
+  ]
 }

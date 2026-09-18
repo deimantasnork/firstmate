@@ -43,7 +43,7 @@ bin/fm-account-choose.sh --vendor claude --pin <second-account>
 ```
 
 - codex: the first account was skipped as `runway exhausted_now at all_models` and the second was selected on its measured `through_reset` headroom, which is the overflowing behavior the captain asked for.
-- claude: the first account was selected with `measured=no`, because its store reported no measurable window; that is fill-first over disclosed uncertainty rather than a block. An operator who wants the other order for that vendor writes it in `order`.
+- claude: the first account was selected with `measured=no`, because its store reported no measurable window; that is fill-first over disclosed uncertainty rather than a block. An operator who wants the other order for that vendor reorders the accounts.
 - the pin run selected the named account with `pin=yes`, ignoring no eligibility rule.
 
 The deterministic half of this evidence is reproducible without any live stores:
@@ -53,4 +53,4 @@ bin/fm-test-run.sh tests/fm-account-choose.test.sh
 bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The first pins the selection order, the reserve, the pin and optional-pin paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's pinned stores, and the refusal before any record is published.
+The first pins the declaration order, the reserve, the pin and optional-pin paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's pinned stores, and the refusal before any record is published.
