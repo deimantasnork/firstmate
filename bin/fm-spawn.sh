@@ -54,10 +54,10 @@
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, effort, and an explicit --account may change, which is what makes a
-#   harness switch one ordinary relaunch. The recorded account is reused by
-#   default (a task keeps the account it was dispatched on, and an explicit pin
-#   keeps pinning), so moving a relaunched task onto another account is
-#   firstmate's deliberate --account decision. It refuses unless the recorded endpoint is positively
+#   harness switch one ordinary relaunch. The recorded pin is reused by
+#   default (an explicitly pinned task keeps pinning), while an automatically
+#   chosen account is re-selected for a new attempt, so moving a relaunched
+#   task onto another account is firstmate's deliberate --account decision. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
@@ -274,7 +274,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--account/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -1512,6 +1512,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -2454,12 +2455,13 @@ fi
 # and the launch keeps today's behavior: a pre-set CLAUDE_CONFIG_DIR is
 # forwarded verbatim, and an unset one means the CLI's own default store.
 #
-# Precedence per vendor: an explicit --account pin, then a store already
-# recorded for this task (a relaunch keeps the account its task was dispatched
-# on), then automatic fill-first selection. A secondmate home is pinned to one
-# store per vendor (its own recorded stores), so it never auto-selects: its
+# Precedence per vendor: an explicit --account pin (including the pin recorded
+# for a relaunch), then automatic fill-first selection, and for a secondmate
+# home a store already recorded for that home. A secondmate home is pinned to
+# one store per vendor (its own recorded stores), so it never auto-selects: its
 # crewmates inherit the home's stores from the home's own environment, and only
-# an explicit --account moves one worker off them.
+# an --account that home's own config/crew-accounts.json resolves moves one
+# worker off them; a pin that home cannot resolve is ignored with a notice.
 ACCOUNT_VENDOR=
 ACCOUNT_NAME=
 ACCOUNT_STORE=
@@ -2493,6 +2495,29 @@ account_store_env_for_vendor() {
 
 account_chooser_field() {  # <chooser-output> <key>
   printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
+}
+
+# account_pin_resolves_here <vendor> <name>
+#   True when THIS home's own config/crew-accounts.json declares <name> with a
+#   store for <vendor>. A secondmate home does not inherit that host-local file,
+#   so an account pin an inherited dispatch profile carries resolves nothing
+#   there and must not refuse the spawn; the home's own store wins instead. A
+#   file that exists but cannot be read or parsed is left for the chooser to
+#   report, so a genuinely broken home config is never silently ignored.
+account_pin_resolves_here() {  # <vendor> <name>
+  local vendor=$1 name=$2 field resolved config_file
+  config_file="$CONFIG/crew-accounts.json"
+  [ -e "$config_file" ] || [ -L "$config_file" ] || return 1
+  case "$vendor" in
+  codex) field=codex_home ;;
+  claude) field=claude_config_dir ;;
+  *) return 1 ;;
+  esac
+  resolved=$(jq -r --arg n "$name" --arg f "$field" '
+    [.accounts[]? | select(type == "object" and .name == $n
+      and (.[$f] | type) == "string" and (.[$f] | length) > 0)] | length > 0
+  ' "$config_file" 2>/dev/null) || return 0
+  [ "$resolved" = true ]
 }
 
 # account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1>
@@ -2588,8 +2613,12 @@ else
         ACCOUNT_PIN_NAME=$(fm_meta_get "$RELAUNCH_META" account)
       fi
       ACCOUNT_ALLOW_AUTO=1
-      if [ "$SECONDMATE_HOME_MARKER" -eq 1 ] && [ -z "$ACCOUNT_PIN_NAME" ]; then
+      if [ "$SECONDMATE_HOME_MARKER" -eq 1 ]; then
         ACCOUNT_ALLOW_AUTO=0
+        if [ -n "$ACCOUNT_PIN_NAME" ] && ! account_pin_resolves_here "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME"; then
+          echo "notice: secondmate home $FM_HOME cannot resolve --account $ACCOUNT_PIN_NAME; using the home's own $ACCOUNT_VENDOR store" >&2
+          ACCOUNT_PIN_NAME=
+        fi
       fi
       if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" - - "$ACCOUNT_ALLOW_AUTO" 0; then
         ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME

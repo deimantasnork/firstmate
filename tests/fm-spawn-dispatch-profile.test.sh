@@ -1075,6 +1075,37 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_batch_forwards_shared_account_pin() {
+  local rec id1 id2 out status launch meta
+  id1=account-batch-a-z9i
+  id2=account-batch-b-z9j
+  rec=$(make_spawn_case account-batch codex "$id1" "$id2")
+  read_case_record "$rec"
+  local codex_a codex_b claude_a claude_b
+  codex_a="$CASE_DIR/store-codex-a"
+  codex_b="$CASE_DIR/store-codex-b"
+  claude_a="$CASE_DIR/store-claude-a"
+  claude_b="$CASE_DIR/store-claude-b"
+  write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$codex_b" "$(account_store_json codex 92 through_reset)"
+  write_account_store "$claude_a" "$(account_store_json claude 50 through_reset)"
+  write_account_store "$claude_b" "$(account_store_json claude 50 through_reset)"
+  write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --account karolina)
+  status=$?
+  expect_code 0 "$status" "a batch with a shared account pin should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_b'" "the batch dropped the shared account pin"
+  for meta in "$HOME_DIR/state/$id1.meta" "$HOME_DIR/state/$id2.meta"; do
+    assert_grep "account=karolina" "$meta" "the batch pin was not recorded on $meta"
+    assert_grep "account_pin=yes" "$meta" "the batch pin was not recorded as an explicit pin on $meta"
+  done
+  pass "batch dispatch forwards a shared --account pin to every pair"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -2089,6 +2120,49 @@ test_secondmate_home_stays_on_its_own_stores() {
   pass "a secondmate home never auto-selects and still honors an explicit pin"
 }
 
+test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve() {
+  local rec id out status launch meta
+  id=account-secondmate-unresolved-z9k
+  rec=$(make_spawn_case account-secondmate-unresolved codex "$id")
+  read_case_record "$rec"
+  # This home IS a secondmate home and purposely carries no host-local account
+  # file, exactly like a home whose primary inherited only crew-dispatch.json.
+  printf '%s\n' "$id" > "$HOME_DIR/.fm-secondmate-home"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+  status=$?
+  expect_code 0 "$status" "an inherited pin a secondmate home cannot resolve must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "cannot resolve --account karolina" "the ignored pin was not disclosed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "an unresolved inherited pin selected a store anyway"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_no_grep "account=" "$meta" "an unresolved inherited pin was recorded on the task record"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "an unresolved pin still probed the account stores"
+
+  # A home with its own file still ignores a pin that file does not declare.
+  local codex_a
+  codex_a="$CASE_DIR/store-codex-a"
+  write_account_store "$codex_a" "$(account_store_json codex 50 through_reset)"
+  cat > "$HOME_DIR/config/crew-accounts.json" <<JSON
+{
+  "accounts": [
+    { "name": "home-store", "codex_home": "$codex_a" }
+  ]
+}
+JSON
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --account karolina)
+  status=$?
+  expect_code 0 "$status" "a home-local pin that resolves no store for the home must not refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "cannot resolve --account karolina" "the unresolved home-local pin was not disclosed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME" "a pin the home does not declare selected a store anyway"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "an undeclared pin still probed the account stores"
+  pass "a secondmate home ignores an account pin its own config cannot resolve"
+}
+
 test_secondmate_spawn_records_one_store_per_vendor() {
   local rec id sm out status launch meta
   id=account-secondmate-spawn-z9f
@@ -2192,6 +2266,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_batch_forwards_shared_account_pin
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
@@ -2216,6 +2291,7 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store
 test_explicit_account_pin_is_forwarded_and_recorded
 test_harnesses_without_a_configured_vendor_are_untouched
 test_secondmate_home_stays_on_its_own_stores
+test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve
 test_secondmate_spawn_records_one_store_per_vendor
 test_no_eligible_account_refuses_before_any_record_is_published
 test_a_pin_needs_a_selection_capable_harness

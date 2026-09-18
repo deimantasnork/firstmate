@@ -242,6 +242,105 @@ test_reserve_allows_the_colleagues_account_above_the_floor() {
   pass "an account exactly at its reserve is still selectable"
 }
 
+test_fractional_percent_and_reserve_still_hold_the_floor() {
+  local out status
+  setup_case reserve-fraction
+  write_store "$STORE_A" "$(quota_json claude 0 exhausted_now lets@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 19.5 through_reset karolina@example.com all_models)"
+  write_default_config
+
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 3 "$status" "a measured percent below an integer reserve must be held"$'\n'"$out"
+  assert_contains "$out" "skipped:19.5% remaining is below the 20% reserve" "the fractional percent bypassed the reserve: $out"
+  assert_not_contains "$out" "selected=karolina" "an account below the reserve was selected"
+
+  write_store "$STORE_B" "$(quota_json claude 25.4 through_reset karolina@example.com all_models)"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "lets-padel", "claude_config_dir": "$STORE_A" },
+    { "name": "karolina", "claude_config_dir": "$STORE_B", "reserve": { "claude": 25.5 } }
+  ]
+}
+JSON
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 3 "$status" "a fractional reserve must still be enforced"$'\n'"$out"
+  assert_contains "$out" "skipped:25.4% remaining is below the 25.5% reserve" "the fractional reserve was ignored: $out"
+  assert_not_contains "$out" "selected=karolina" "an account below a fractional reserve was selected"
+  pass "a fractional measured percent and a fractional reserve both hold the floor"
+}
+
+test_order_entry_without_a_vendor_store_is_not_a_candidate() {
+  local out status
+  setup_case order-wrong-vendor
+  write_store "$STORE_B" "$(quota_json codex 92 through_reset karolina@example.com all_models)"
+  mkdir -p "$FIXTURE/store-claude-only"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" },
+    { "name": "karolina", "codex_home": "$STORE_B" }
+  ],
+  "order": { "codex": ["claude-only", "karolina"] }
+}
+JSON
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "an order entry with no store for the vendor must not be fatal"$'\n'"$out"
+  [ "$(field "$out" selected)" = karolina ] || fail "the usable account was not selected: $out"
+  assert_not_contains "$out" "candidate=claude-only" "an account with no store for the vendor was a candidate: $out"
+  pass "an order entry naming an account with no store for the vendor is skipped, not fatal"
+}
+
+test_top_level_reserve_is_refused() {
+  local out status
+  setup_case top-level-reserve
+  write_store "$STORE_A" "$(quota_json claude 90 through_reset lets@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 90 through_reset karolina@example.com all_models)"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "lets-padel", "claude_config_dir": "$STORE_A" },
+    { "name": "karolina", "claude_config_dir": "$STORE_B" }
+  ],
+  "reserve": { "claude": 20 }
+}
+JSON
+
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 1 "$status" "a top-level reserve that would enforce nothing must be refused"$'\n'"$out"
+  assert_contains "$out" "reserve must be set per account (accounts[].reserve), not at the top level" \
+    "the refusal did not point at the per-account form: $out"
+
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "--validate must refuse a top-level reserve"$'\n'"$out"
+  assert_contains "$out" "accounts[].reserve" "--validate did not report the top-level reserve: $out"
+  pass "a top-level reserve is refused with a pointer to the per-account form"
+}
+
+test_top_level_scalar_is_refused() {
+  local out status
+  setup_case top-level-scalar
+  printf '%s\n' '"hello"' > "$CONFIG"
+
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "--validate must refuse a top-level scalar"$'\n'"$out"
+  assert_contains "$out" "top-level value must be an object" "--validate accepted a top-level scalar: $out"
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "selection must refuse a top-level scalar"$'\n'"$out"
+  assert_contains "$out" "top-level value must be an object" "selection did not name the top-level type: $out"
+  assert_not_contains "$out" "could not be read" "selection fell through to a generic read error: $out"
+  pass "a top-level JSON scalar is refused as an invalid account file"
+}
+
 test_reserve_does_not_apply_to_codex() {
   local out status
   setup_case reserve-codex
@@ -532,6 +631,18 @@ test_malformed_config_is_refused() {
   expect_code 1 "$status" "an order entry naming an undeclared account must be refused"$'\n'"$out"
   assert_contains "$out" "order names an account that is not declared" "the schema error was not reported: $out"
 
+  printf '%s\n' '{"accounts":"hello"}' > "$CONFIG"
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "a non-array accounts value must be refused"$'\n'"$out"
+  assert_contains "$out" "accounts must be an array" "the schema error was not reported: $out"
+
+  printf '%s\n' '{"accounts":[5]}' > "$CONFIG"
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "a non-object account entry must be refused"$'\n'"$out"
+  assert_contains "$out" "each account must be an object" "the schema error was not reported: $out"
+
   printf '%s\n' 'not json' > "$CONFIG"
   out=$(choose --vendor codex)
   status=$?
@@ -610,6 +721,7 @@ test_fill_first_over_the_configured_order
 test_exhausted_first_account_overflows_to_the_second
 test_zero_percent_first_account_overflows
 test_reserve_floor_holds_the_colleagues_claude_account
+test_fractional_percent_and_reserve_still_hold_the_floor
 test_reserve_allows_the_colleagues_account_above_the_floor
 test_reserve_does_not_apply_to_codex
 test_unmeasurable_first_account_is_selected_as_disclosed_uncertainty
@@ -624,6 +736,9 @@ test_no_eligible_account_refuses_with_evidence
 test_no_config_selects_nothing
 test_vendor_with_no_configured_account_selects_nothing
 test_declaration_order_covers_accounts_the_order_list_omits
+test_order_entry_without_a_vendor_store_is_not_a_candidate
+test_top_level_reserve_is_refused
+test_top_level_scalar_is_refused
 test_missing_store_directory_is_a_configuration_error
 test_malformed_config_is_refused
 test_validate_checks_the_whole_file

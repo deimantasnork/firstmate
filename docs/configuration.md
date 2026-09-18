@@ -1156,6 +1156,7 @@ A pre-set store is forwarded only when this home has no account configuration; w
 A pin is an explicit decision, so it bypasses the order, the reserve, and the exhaustion check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
 A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
+An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with a store for the vendor; an account pin an inherited dispatch profile carries but the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a profile change on the primary never refuses that home's dispatch.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
