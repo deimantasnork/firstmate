@@ -1894,14 +1894,17 @@ install_quota_axi_fake() {  # <fakebin> <log>
 #!/usr/bin/env bash
 set -u
 if [ "${FM_FAKE_QUOTA_LOG:-}" ]; then printf '%s\n' "$*" >> "$FM_FAKE_QUOTA_LOG"; fi
-store=
-if [ -n "${CODEX_HOME:-}" ]; then
-  store=$CODEX_HOME
-elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  store=$CLAUDE_CONFIG_DIR
-else
-  exit 2
-fi
+provider=
+case "${1:-}" in
+  --provider) provider=${2:-} ;;
+  *) exit 2 ;;
+esac
+case "$provider" in
+  codex) store=${CODEX_HOME:-} ;;
+  claude) store=${CLAUDE_CONFIG_DIR:-} ;;
+  *) exit 2 ;;
+esac
+[ -n "$store" ] || exit 2
 [ -f "$store/.fm-quota.json" ] || { printf 'no quota fixture at %s\n' "$store" >&2; exit 2; }
 cat "$store/.fm-quota.json"
 SH
@@ -2217,6 +2220,48 @@ test_secondmate_spawn_records_one_store_per_vendor() {
   pass "a secondmate spawn records and forwards one store per vendor"
 }
 
+test_secondmate_recovery_respawn_reuses_the_recorded_stores() {
+  local rec id sm out status launch meta codex_a codex_b claude_a claude_b
+  id=account-secondmate-respawn-z9l
+  rec=$(make_spawn_case account-secondmate-respawn codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  codex_a="$CASE_DIR/store-codex-a"
+  codex_b="$CASE_DIR/store-codex-b"
+  claude_a="$CASE_DIR/store-claude-a"
+  claude_b="$CASE_DIR/store-claude-b"
+  write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
+  write_account_store "$claude_a" "$(account_store_json claude 70 through_reset)"
+  write_account_store "$claude_b" "$(account_store_json claude 90 through_reset)"
+  write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a fresh secondmate spawn with accounts configured should succeed"$'\n'"$out"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "codex_home=$codex_b" "$meta" "the fresh spawn did not record its codex store"
+  assert_grep "claude_config_dir=$claude_a" "$meta" "the fresh spawn did not record its claude store"
+
+  # The captain's accounts read healthy again, but a recovery respawn
+  # (bin/fm-bootstrap.sh's SECONDMATE_LIVENESS sweep: no --relaunch and no home
+  # positional) must keep the home on the stores its own record already holds.
+  write_account_store "$codex_a" "$(account_store_json codex 100 through_reset)"
+  : > "$CASE_DIR/quota.log"
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a recovery respawn of the recorded home should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_b'" "the recovery respawn re-selected the codex store"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_a'" "the recovery respawn re-selected the claude store"
+  assert_grep "codex_home=$codex_b" "$meta" "the recovery respawn rewrote the home's codex store"
+  assert_grep "claude_config_dir=$claude_a" "$meta" "the recovery respawn rewrote the home's claude store"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "the recovery respawn probed the account stores: $(cat "$CASE_DIR/quota.log")"
+  pass "a secondmate recovery respawn keeps the home's recorded stores without re-selecting"
+}
+
 test_no_eligible_account_refuses_before_any_record_is_published() {
   local rec id out status
   id=account-none-eligible-z9g
@@ -2312,6 +2357,7 @@ test_harnesses_without_a_configured_vendor_are_untouched
 test_secondmate_home_stays_on_its_own_stores
 test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve
 test_secondmate_spawn_records_one_store_per_vendor
+test_secondmate_recovery_respawn_reuses_the_recorded_stores
 test_no_eligible_account_refuses_before_any_record_is_published
 test_a_pin_needs_a_selection_capable_harness
 
