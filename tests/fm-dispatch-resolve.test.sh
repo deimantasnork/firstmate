@@ -1005,4 +1005,18 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- a profile account pin rides through to the spawned command --------------
+# config/crew-accounts.json owns the accounts themselves; the resolver only
+# carries a profile's declared pin onto the profile line fm-spawn consumes.
+reset_log
+jq '(.rules[] | select(.when | test("root cause")) | .use) |= map(if .harness == "cursor" then . + {account: "karolina"} else . end)' \
+  "$BASE_RULES" > "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an account-bearing profile resolves"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium' --account 'karolina'" "the profile account pin is emitted for fm-spawn"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  account=karolina' "the candidate line reports the declared pin"
+cp "$BASE_RULES" "$RULES"
+pass "a profile account pin is carried onto the emitted profile line"
+
 printf '# all fm-dispatch-resolve tests passed\n'

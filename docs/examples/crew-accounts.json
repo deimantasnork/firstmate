@@ -1,0 +1,19 @@
+{
+  "accounts": [
+    {
+      "name": "lets-padel",
+      "codex_home": "/home/me/.codex-lets-padel",
+      "claude_config_dir": "/home/me/.claude"
+    },
+    {
+      "name": "karolina",
+      "codex_home": "/home/me/.codex-karolina",
+      "claude_config_dir": "/home/me/.claude-karolina",
+      "reserve": { "claude": 20 }
+    }
+  ],
+  "order": {
+    "codex": ["lets-padel", "karolina"],
+    "claude": ["lets-padel", "karolina"]
+  }
+}

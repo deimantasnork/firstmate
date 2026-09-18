@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account <name>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account <name>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account <name>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -53,8 +53,11 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   model, effort, and an explicit --account may change, which is what makes a
+#   harness switch one ordinary relaunch. The recorded account is reused by
+#   default (a task keeps the account it was dispatched on, and an explicit pin
+#   keeps pinning), so moving a relaunched task onto another account is
+#   firstmate's deliberate --account decision. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
@@ -87,6 +90,15 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   --account <name> pins the named credential account from local config/
+#   crew-accounts.json, and without it a codex or claude spawn selects one
+#   automatically by fill-first order (bin/fm-account-choose.sh owns the
+#   selection rules; docs/configuration.md "Crew accounts" owns the schema).
+#   The chosen store is forwarded as CODEX_HOME or CLAUDE_CONFIG_DIR so the
+#   choice is per-dispatch rather than ambient, and it is recorded on the task
+#   record as account= (plus account_pin=yes when it was named explicitly, and
+#   account_codex=/codex_home=/account_claude=/claude_config_dir= on a
+#   secondmate home, which holds one store per vendor across relaunches).
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -641,6 +653,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+ACCOUNT_ARG=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -649,6 +662,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ACCOUNT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -677,6 +691,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    account)
+      ACCOUNT_ARG=$a
+      ACCOUNT_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -731,6 +749,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --account) want_value=account ;;
+  --account=*)
+    ACCOUNT_ARG=${a#--account=}
+    ACCOUNT_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -775,6 +798,27 @@ done
   echo "error: --effort requires a non-empty value" >&2
   exit 1
 }
+[ "$ACCOUNT_SET" -eq 0 ] || [ -n "$ACCOUNT_ARG" ] || {
+  echo "error: --account requires a non-empty value" >&2
+  exit 1
+}
+if [ "$ACCOUNT_SET" -eq 1 ]; then
+  # Same charset as the config schema's account name (bin/fm-account-choose.sh):
+  # the value reaches one CLI flag, a meta line, and a shell-quoted env prefix.
+  case "$ACCOUNT_ARG" in
+  [a-z0-9]*) ;;
+  *)
+    echo "error: --account must start with a lowercase letter or digit" >&2
+    exit 1
+    ;;
+  esac
+  case "$ACCOUNT_ARG" in
+  *[!a-z0-9._-]*)
+    echo "error: --account may contain only lowercase letters, digits, dot, underscore, and dash" >&2
+    exit 1
+    ;;
+  esac
+fi
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
   exit 1
@@ -917,6 +961,17 @@ spawn_remote_secondmate() {
     return 3
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
+  # A remote home resolves its own stores on its own host: this parent's
+  # config/crew-accounts.json names THIS host's paths, so honoring an --account
+  # pin here would mean silently launching on a store that does not exist there.
+  # The remote leg resolves from that home's own account file instead, so the pin
+  # is refused loudly rather than dropped.
+  if [ "$ACCOUNT_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --account applies to this host's config/crew-accounts.json, which names local store paths; a remote secondmate resolves its stores on its own host from that home's own config/crew-accounts.json" >&2
+    return 1
+  fi
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
   positional=${POS[1]:-}
@@ -1682,6 +1737,7 @@ RELAUNCH_PRIOR_HARNESS=
 # 1 when the recorded endpoint is authoritatively gone and this relaunch must
 # create a fresh one for the task rather than adopt its recorded address.
 RELAUNCH_REBIND=0
+RELAUNCH_META=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -2385,6 +2441,163 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
     unset CLAUDE_CONFIG_DIR
+  fi
+fi
+
+# ---- per-account credential selection (config/crew-accounts.json) -------------
+# A subscription account is one named entry in the local, gitignored
+# config/crew-accounts.json holding that account's Codex store and Claude store
+# (docs/configuration.md "Crew accounts" owns the schema). This block picks the
+# account this spawn runs on, before any worktree or endpoint exists, and
+# forwards the chosen store as CODEX_HOME or CLAUDE_CONFIG_DIR so the choice is
+# per-dispatch rather than ambient. With no config file the whole block is inert
+# and the launch keeps today's behavior: a pre-set CLAUDE_CONFIG_DIR is
+# forwarded verbatim, and an unset one means the CLI's own default store.
+#
+# Precedence per vendor: an explicit --account pin, then a store already
+# recorded for this task (a relaunch keeps the account its task was dispatched
+# on), then automatic fill-first selection. A secondmate home is pinned to one
+# store per vendor (its own recorded stores), so it never auto-selects: its
+# crewmates inherit the home's stores from the home's own environment, and only
+# an explicit --account moves one worker off them.
+ACCOUNT_VENDOR=
+ACCOUNT_NAME=
+ACCOUNT_STORE=
+ACCOUNT_PIN=no
+SM_CODEX_NAME=
+SM_CODEX_STORE=
+SM_CLAUDE_NAME=
+SM_CLAUDE_STORE=
+ACCOUNT_EVIDENCE=
+ACCOUNT_CHOOSER="$SCRIPT_DIR/fm-account-choose.sh"
+SECONDMATE_HOME_MARKER=0
+if [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  SECONDMATE_HOME_MARKER=1
+fi
+
+account_vendor_for_harness() {
+  case "$1" in
+  codex) printf 'codex\n' ;;
+  claude) printf 'claude\n' ;;
+  *) return 1 ;;
+  esac
+}
+
+account_store_env_for_vendor() {
+  case "$1" in
+  codex) printf 'CODEX_HOME\n' ;;
+  claude) printf 'CLAUDE_CONFIG_DIR\n' ;;
+  *) return 1 ;;
+  esac
+}
+
+account_chooser_field() {  # <chooser-output> <key>
+  printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
+}
+
+# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1>
+#   Sets ACCOUNT_RESOLVED_NAME, ACCOUNT_RESOLVED_STORE, ACCOUNT_RESOLVED_PIN,
+#   ACCOUNT_RESOLVED_EVIDENCE. Returns 1 (selecting nothing) when this vendor
+#   has no account to select, and refuses the whole spawn on a configuration
+#   error or when no configured account can be measured as usable. A pin is
+#   optional only for a caller resolving several vendors with one account name:
+#   where that account declares no store for this vendor, selection continues
+#   instead of refusing. Everywhere else a pin that cannot apply is refused
+#   rather than silently dropped.
+account_resolve() {
+  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 pin_optional=${6:-0}
+  local out rc=0 args name store pin_used measured pct runway identity
+  ACCOUNT_RESOLVED_NAME=
+  ACCOUNT_RESOLVED_STORE=
+  ACCOUNT_RESOLVED_PIN=no
+  ACCOUNT_RESOLVED_EVIDENCE=
+  if [ -z "$pin" ] && [ -n "$recorded_store" ] && [ "$recorded_store" != - ]; then
+    if [ ! -d "$recorded_store" ]; then
+      echo "error: task $ID is recorded on the $vendor store $recorded_store, which is not an existing directory; restore it or re-pin with --account <name>" >&2
+      exit 1
+    fi
+    ACCOUNT_RESOLVED_STORE=$recorded_store
+    ACCOUNT_RESOLVED_PIN=yes
+    ACCOUNT_RESOLVED_EVIDENCE="account: vendor=$vendor account=$recorded_name store=$recorded_store recorded=yes"
+    ACCOUNT_RESOLVED_NAME=$recorded_name
+    return 0
+  fi
+  [ -n "$pin" ] || [ "$allow_auto" = 1 ] || return 1
+  args=(--vendor "$vendor")
+  if [ -n "$pin" ]; then
+    args+=(--pin "$pin")
+    [ "$pin_optional" != 1 ] || args+=(--pin-optional)
+  fi
+  out=$("$ACCOUNT_CHOOSER" "${args[@]}" 2>&1) || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    printf '%s\n' "$out" >&2
+    echo "error: no $vendor account has headroom for task $ID; add one to config/crew-accounts.json or pin one explicitly with --account <name>" >&2
+    exit 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+  name=$(account_chooser_field "$out" selected)
+  store=$(account_chooser_field "$out" store)
+  pin_used=$(account_chooser_field "$out" pin)
+  measured=$(account_chooser_field "$out" measured)
+  pct=$(account_chooser_field "$out" percent)
+  runway=$(account_chooser_field "$out" runway)
+  identity=$(account_chooser_field "$out" identity)
+  if [ -z "$name" ] || [ "$name" = none ]; then
+    return 1
+  fi
+  ACCOUNT_RESOLVED_NAME=$name
+  ACCOUNT_RESOLVED_STORE=$store
+  ACCOUNT_RESOLVED_PIN=$pin_used
+  ACCOUNT_RESOLVED_EVIDENCE="account: vendor=$vendor account=$name store=$store measured=$measured percent=$pct runway=$runway identity=$identity"
+  return 0
+}
+
+if [ "$RAW_LAUNCH" = 1 ]; then
+  [ "$ACCOUNT_SET" -eq 0 ] || {
+    echo "error: --account needs a resolved harness, not a raw launch command; set the store in the command itself" >&2
+    exit 1
+  }
+else
+  if [ "$KIND" = secondmate ]; then
+    SM_CODEX_RECORDED=$(fm_meta_get "$RELAUNCH_META" codex_home)
+    SM_CLAUDE_RECORDED=$(fm_meta_get "$RELAUNCH_META" claude_config_dir)
+    if account_resolve codex "$ACCOUNT_ARG" "$(fm_meta_get "$RELAUNCH_META" account_codex)" "$SM_CODEX_RECORDED" 1 1; then
+      SM_CODEX_NAME=$ACCOUNT_RESOLVED_NAME
+      SM_CODEX_STORE=$ACCOUNT_RESOLVED_STORE
+      ACCOUNT_EVIDENCE=$ACCOUNT_RESOLVED_EVIDENCE
+    fi
+    if account_resolve claude "$ACCOUNT_ARG" "$(fm_meta_get "$RELAUNCH_META" account_claude)" "$SM_CLAUDE_RECORDED" 1 1; then
+      SM_CLAUDE_NAME=$ACCOUNT_RESOLVED_NAME
+      SM_CLAUDE_STORE=$ACCOUNT_RESOLVED_STORE
+      ACCOUNT_EVIDENCE="${ACCOUNT_EVIDENCE:+$ACCOUNT_EVIDENCE
+}$ACCOUNT_RESOLVED_EVIDENCE"
+    fi
+  else
+    ACCOUNT_VENDOR=$(account_vendor_for_harness "$HARNESS") || ACCOUNT_VENDOR=
+    if [ -z "$ACCOUNT_VENDOR" ]; then
+      [ "$ACCOUNT_SET" -eq 0 ] || {
+        echo "error: --account applies only to codex and claude spawns, because only those harnesses read a credential store this home can select; harness '$HARNESS' has none" >&2
+        exit 1
+      }
+    else
+      ACCOUNT_PIN_NAME=$ACCOUNT_ARG
+      if [ -z "$ACCOUNT_PIN_NAME" ] && [ "$(fm_meta_get "$RELAUNCH_META" account_pin)" = yes ]; then
+        ACCOUNT_PIN_NAME=$(fm_meta_get "$RELAUNCH_META" account)
+      fi
+      ACCOUNT_ALLOW_AUTO=1
+      if [ "$SECONDMATE_HOME_MARKER" -eq 1 ] && [ -z "$ACCOUNT_PIN_NAME" ]; then
+        ACCOUNT_ALLOW_AUTO=0
+      fi
+      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" - - "$ACCOUNT_ALLOW_AUTO" 0; then
+        ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME
+        ACCOUNT_STORE=$ACCOUNT_RESOLVED_STORE
+        ACCOUNT_PIN=$ACCOUNT_RESOLVED_PIN
+        ACCOUNT_EVIDENCE=$ACCOUNT_RESOLVED_EVIDENCE
+      fi
+    fi
   fi
 fi
 
@@ -4344,7 +4557,14 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  # The trust entry belongs in the store THIS worker will read, not in whatever
+  # store happens to be ambient: a per-dispatch account selection (or a
+  # secondmate home's recorded store) would otherwise write the worktree entry
+  # into one store while the pane ran from another and wedged on the dialog.
+  claude_trust_store=$ACCOUNT_STORE
+  [ -n "$claude_trust_store" ] || claude_trust_store=$SM_CLAUDE_STORE
+  [ -n "$claude_trust_store" ] || claude_trust_store=${CLAUDE_CONFIG_DIR:-}
+  if ! CLAUDE_CONFIG_DIR="$claude_trust_store" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4861,7 +5081,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_pin account_provider account_codex codex_home account_claude claude_config_dir busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4880,10 +5100,24 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # The worker account pin, only when this home declares one, so an unpinned
-  # task record stays byte-identical.
-  [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
-  [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  # The worker account pin (config/claude-account, config/pi-account), when this
+  # home declares one, so an unpinned task record stays byte-identical; the pin
+  # wins over the per-dispatch account selection.
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    echo "account=$WORKER_ACCOUNT_DECLARED"
+    [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  else
+    # The credential account this dispatch selected (bin/fm-account-choose.sh owns
+    # the choice; docs/configuration.md "Crew accounts" owns the schema).
+    # account_pin=yes records that the account was named explicitly, so a relaunch
+    # re-selects for an automatic choice but keeps an explicit one.
+    if [ -n "$ACCOUNT_NAME" ]; then
+      echo "account=$ACCOUNT_NAME"
+      if [ "$ACCOUNT_PIN" = yes ]; then
+        echo "account_pin=yes"
+      fi
+    fi
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4913,6 +5147,16 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+    # A secondmate home's per-vendor stores, so every relaunch puts the home
+    # back on the same account rather than letting it drift to another one.
+    if [ -n "$SM_CODEX_STORE" ]; then
+      [ -z "$SM_CODEX_NAME" ] || echo "account_codex=$SM_CODEX_NAME"
+      echo "codex_home=$SM_CODEX_STORE"
+    fi
+    if [ -n "$SM_CLAUDE_STORE" ]; then
+      [ -z "$SM_CLAUDE_NAME" ] || echo "account_claude=$SM_CLAUDE_NAME"
+      echo "claude_config_dir=$SM_CLAUDE_STORE"
+    fi
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
@@ -5096,15 +5340,16 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-# A home's worker account pin replaces that forwarding: the launch names the
-# pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
+# inherit firstmate's current environment, so a bare `claude` or `codex` in the
+# pane falls back to that CLI's own default store (~/.claude, ~/.codex) even when
+# firstmate resolved another store for this dispatch. A home's worker account pin
+# replaces the per-dispatch forwarding: the launch names the pinned root (or
+# unsets the variable for the ordinary Claude account) and sheds the environment
+# credentials Claude ranks above the root's login. With no pin, forward the store
+# this spawn selected - the config/crew-accounts.json choice, or an explicit
+# --account pin - and otherwise fall back to firstmate's own ambient value, so a
+# crewmate uses the same credential/config firstmate is authenticated with.
+# A secondmate home's two stores are prefixed by its own block below.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -5118,8 +5363,17 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+elif [ "$KIND" != secondmate ]; then
+  ACCOUNT_LAUNCH_STORE=$ACCOUNT_STORE
+  if [ -z "$ACCOUNT_LAUNCH_STORE" ] && [ -n "$ACCOUNT_VENDOR" ]; then
+    case "$ACCOUNT_VENDOR" in
+    codex) ACCOUNT_LAUNCH_STORE=${CODEX_HOME:-} ;;
+    claude) ACCOUNT_LAUNCH_STORE=${CLAUDE_CONFIG_DIR:-} ;;
+    esac
+  fi
+  if [ -n "$ACCOUNT_VENDOR" ] && [ -n "$ACCOUNT_LAUNCH_STORE" ]; then
+    LAUNCH="$(account_store_env_for_vendor "$ACCOUNT_VENDOR")=$(shell_quote "$ACCOUNT_LAUNCH_STORE") $LAUNCH"
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -5142,6 +5396,21 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
+  # Deliver each vendor's store into the home's own environment so the home's
+  # agent AND every crewmate it later spawns inherit it: that is what keeps one
+  # secondmate home on a single store per vendor (AGENTS.md section 4). The
+  # recorded store wins and firstmate's own ambient value is the fallback, so a
+  # config-less home keeps today's behavior.
+  sm_codex_store=$SM_CODEX_STORE
+  [ -n "$sm_codex_store" ] || sm_codex_store=${CODEX_HOME:-}
+  sm_claude_store=$SM_CLAUDE_STORE
+  [ -n "$sm_claude_store" ] || sm_claude_store=${CLAUDE_CONFIG_DIR:-}
+  if [ -n "$sm_codex_store" ]; then
+    LAUNCH="CODEX_HOME=$(shell_quote "$sm_codex_store") $LAUNCH"
+  fi
+  if [ -n "$sm_claude_store" ]; then
+    LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$sm_claude_store") $LAUNCH"
+  fi
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
@@ -5484,4 +5753,15 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
+# The credential evidence for this dispatch, one line per vendor, so the
+# supervisor can see which store was chosen and on what measured basis.
+if [ -n "$ACCOUNT_EVIDENCE" ]; then
+  printf '%s\n' "$ACCOUNT_EVIDENCE"
+fi
+# The pin annotation wins when this home declares one; otherwise the
+# per-dispatch account selection is named.
+SPAWN_ACCOUNT_NOTE=$SPAWN_ACCOUNT
+if [ -z "$WORKER_ACCOUNT" ] && [ -n "$ACCOUNT_NAME" ]; then
+  SPAWN_ACCOUNT_NOTE=" account=$ACCOUNT_NAME"
+fi
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT_NOTE"

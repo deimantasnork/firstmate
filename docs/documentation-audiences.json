@@ -575,6 +575,14 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/examples/crew-accounts.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/verification/crew-accounts.md",
+      "audience": "maintainer-verification"
     }
   ]
 }
