@@ -211,6 +211,8 @@ config_schema_error() {
       ["name", "reserve"] + store_fields | index($e.key) != null;
     if type != "object" then "top-level value must be an object"
     elif has("reserve") then "reserve must be set per account (accounts[].reserve), not at the top level"
+    elif ([keys[] | select(. != "accounts")] | length) > 0
+      then "top-level keys must be accounts only (got: " + ([keys[] | select(. != "accounts")] | join(", ")) + ")"
     elif (.accounts | type) != "array" then "accounts must be an array"
     else
     .accounts as $accounts |

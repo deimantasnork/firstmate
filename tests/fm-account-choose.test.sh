@@ -608,6 +608,19 @@ test_malformed_config_is_refused() {
   expect_code 1 "$status" "a non-object account entry must be refused"$'\n'"$out"
   assert_contains "$out" "each account must be an object" "the schema error was not reported: $out"
 
+  printf '%s\n' '{"accounts":[{"name":"a","codex_home":"/tmp"}],"order":{"claude":["a"]}}' > "$CONFIG"
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "a removed top-level order key must be refused"$'\n'"$out"
+  assert_contains "$out" "top-level keys must be accounts only" "the removed order key was silently accepted: $out"
+  assert_contains "$out" "order" "the refusal did not name the offending key: $out"
+
+  printf '%s\n' '{"accounts":[{"name":"a","codex_home":"/tmp"}],"notes":"legacy"}' > "$CONFIG"
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "an unknown top-level key must be refused"$'\n'"$out"
+  assert_contains "$out" "top-level keys must be accounts only" "an unknown top-level key was silently accepted: $out"
+
   printf '%s\n' 'not json' > "$CONFIG"
   out=$(choose --vendor codex)
   status=$?
