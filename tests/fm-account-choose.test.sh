@@ -29,21 +29,22 @@ make_fake_quota() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-store=
+provider=
 case "${1:-}" in
-  --provider) ;;
+  --provider) provider=${2:-} ;;
   *) printf 'fake quota-axi: unexpected argv: %s\n' "$*" >&2; exit 2 ;;
 esac
 if [ "${FM_FAKE_QUOTA_LOG:-}" ]; then
   printf 'argv=%s CODEX_HOME=%s CLAUDE_CONFIG_DIR=%s\n' \
     "$*" "${CODEX_HOME:-}" "${CLAUDE_CONFIG_DIR:-}" >> "$FM_FAKE_QUOTA_LOG"
 fi
-if [ -n "${CODEX_HOME:-}" ]; then
-  store=$CODEX_HOME
-elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  store=$CLAUDE_CONFIG_DIR
-else
-  printf 'fake quota-axi: no store selected\n' >&2
+case "$provider" in
+  codex) store=${CODEX_HOME:-} ;;
+  claude) store=${CLAUDE_CONFIG_DIR:-} ;;
+  *) printf 'fake quota-axi: unexpected provider: %s\n' "${provider:-none}" >&2; exit 2 ;;
+esac
+if [ -z "$store" ]; then
+  printf 'fake quota-axi: no %s store selected\n' "$provider" >&2
   exit 2
 fi
 [ -f "$store/.fm-quota.json" ] || { printf 'fake quota-axi: no fixture at %s\n' "$store" >&2; exit 2; }
@@ -404,6 +405,12 @@ test_unreadable_snapshot_is_disclosed_uncertainty() {
   [ "$(field "$out" selected)" = primary ] || fail "unparseable evidence did not fall back to fill-first: $out"
   assert_contains "$out" "selected:headroom unmeasurable (quota-axi returned an invalid snapshot)" \
     "the invalid snapshot was not named as the reason: $out"
+  [ "$(field "$out" measured)" = no ] || fail "an unparseable probe was not reported as measured=no: $out"
+  [ "$(field "$out" percent)" = unknown ] || fail "an unparseable probe reported a percent: $out"
+  [ "$(field "$out" runway)" = unknown ] || fail "an unparseable probe reported a runway: $out"
+  [ "$(field "$out" identity)" = unknown ] || fail "an unparseable probe reported an identity: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=no percent=unknown runway=unknown -> selected:headroom unmeasurable (quota-axi returned an invalid snapshot)" \
+    "the unmeasurable candidate line did not carry the documented unknown fields: $out"
   pass "an unparseable snapshot is disclosed uncertainty rather than a block"
 }
 

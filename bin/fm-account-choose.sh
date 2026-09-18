@@ -376,6 +376,10 @@ probe_store() {  # <vendor> <store>
 # account's own headroom; anything else falls back to the worst known row.
 probe_evidence() {  # <vendor>
   local vendor=$1
+  if [ -z "$PROBE_JSON" ]; then
+    printf 'no unknown unknown unknown unknown\n'
+    return 0
+  fi
   printf '%s\n' "$PROBE_JSON" | jq -r --arg v "$vendor" '
     def flat: [explode[] | select(. >= 32)] | implode | gsub("[[:space:]]"; "_");
     def show($x): if $x == null or $x == "" then "unknown" else ($x | flat) end;

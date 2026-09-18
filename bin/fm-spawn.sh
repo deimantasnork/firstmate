@@ -2577,14 +2577,31 @@ if [ "$RAW_LAUNCH" = 1 ]; then
   }
 else
   if [ "$KIND" = secondmate ]; then
-    SM_CODEX_RECORDED=$(fm_meta_get "$RELAUNCH_META" codex_home)
-    SM_CLAUDE_RECORDED=$(fm_meta_get "$RELAUNCH_META" claude_config_dir)
-    if account_resolve codex "$ACCOUNT_ARG" "$(fm_meta_get "$RELAUNCH_META" account_codex)" "$SM_CODEX_RECORDED" 1 1; then
+    # A recovery respawn (bin/fm-bootstrap.sh's SECONDMATE_LIVENESS sweep runs
+    # `fm-spawn.sh <id> --secondmate` without --relaunch) reuses the home's own
+    # recorded per-vendor stores exactly like a relaunch, so a live home cannot
+    # drift between stores mid-flight. Only a record that is this home's own
+    # secondmate record is trusted; a foreign or stale record leaves a genuinely
+    # fresh creation resolving as it does today.
+    sm_record_meta=$RELAUNCH_META
+    if [ -z "$sm_record_meta" ] \
+      && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } \
+      && fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" 2>/dev/null \
+      && [ "$(fm_meta_get "$STATE/$ID.meta" kind)" = secondmate ]; then
+      sm_record_home=$(fm_meta_get "$STATE/$ID.meta" home)
+      if [ -n "$sm_record_home" ] \
+        && { [ -z "$FIRSTMATE_HOME" ] || [ "$sm_record_home" = "$FIRSTMATE_HOME" ]; }; then
+        sm_record_meta=$STATE/$ID.meta
+      fi
+    fi
+    SM_CODEX_RECORDED=$(fm_meta_get "$sm_record_meta" codex_home)
+    SM_CLAUDE_RECORDED=$(fm_meta_get "$sm_record_meta" claude_config_dir)
+    if account_resolve codex "$ACCOUNT_ARG" "$(fm_meta_get "$sm_record_meta" account_codex)" "$SM_CODEX_RECORDED" 1 1; then
       SM_CODEX_NAME=$ACCOUNT_RESOLVED_NAME
       SM_CODEX_STORE=$ACCOUNT_RESOLVED_STORE
       ACCOUNT_EVIDENCE=$ACCOUNT_RESOLVED_EVIDENCE
     fi
-    if account_resolve claude "$ACCOUNT_ARG" "$(fm_meta_get "$RELAUNCH_META" account_claude)" "$SM_CLAUDE_RECORDED" 1 1; then
+    if account_resolve claude "$ACCOUNT_ARG" "$(fm_meta_get "$sm_record_meta" account_claude)" "$SM_CLAUDE_RECORDED" 1 1; then
       SM_CLAUDE_NAME=$ACCOUNT_RESOLVED_NAME
       SM_CLAUDE_STORE=$ACCOUNT_RESOLVED_STORE
       ACCOUNT_EVIDENCE="${ACCOUNT_EVIDENCE:+$ACCOUNT_EVIDENCE
