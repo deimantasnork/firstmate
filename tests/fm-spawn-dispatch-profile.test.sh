@@ -1144,21 +1144,23 @@ SH
   pass "absent Lavish configuration preserves the destination environment"
 }
 
-test_claude_omits_config_dir_prefix_when_unset() {
+test_claude_pins_the_default_store_when_unset() {
   local rec id out status launch
   id=profile-claude-nocfgdir-z18
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
 
   # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
+  # default path where fm-spawn must clear any override inherited by the pane.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
     "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR" \
+    "claude launch must clear a different store inherited by the pane"
+  pass "claude pins the default store when firstmate has no CLAUDE_CONFIG_DIR set"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -1617,7 +1619,7 @@ claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$2" "$3")env -u CLAUDE_CONFIG_DIR env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1867,6 +1869,10 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_a'" "the selected account's store was not forwarded"
   assert_not_contains "$launch" "$ambient" "the ambient store beat the per-dispatch selection"
+  jq -e --arg wt "$WT_DIR" '.projects[$wt].hasTrustDialogAccepted == true' \
+    "$claude_a/.claude.json" >/dev/null \
+    || fail "the exact worktree key was not trusted in the selected account's store"
+  [ ! -e "$ambient/.claude.json" ] || fail "trust was registered in the ambient store"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep "account=primary" "$meta" "the chosen account was not recorded on the task record"
   pass "a claude spawn selects per dispatch, ahead of an ambient store"
@@ -2182,7 +2188,7 @@ test_batch_forwards_shared_account_pin
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
-test_claude_omits_config_dir_prefix_when_unset
+test_claude_pins_the_default_store_when_unset
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
