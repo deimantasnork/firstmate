@@ -34,6 +34,27 @@ $1
 EOF
 }
 
+# make_pool_case <name>: the shape a Treehouse pool shared between two clones of
+# one repository leaves behind. Treehouse pools by repository rather than by
+# clone, so a secondmate home whose own clone is POOL_PROJ can be handed a free
+# slot - POOL_WT - that is linked to the PRIMARY home's clone, POOL_PEER, a
+# separate clone of the same origin. POOL_WT is therefore a genuine linked
+# worktree of the same repository whose git common dir is POOL_PEER's, not
+# POOL_PROJ's, which is exactly the case that used to be refused.
+make_pool_case() {
+  local name=$1 origin_url
+  POOL_CASE="$TMP_ROOT/$name"
+  POOL_PEER="$POOL_CASE/peer-clone"
+  POOL_WT="$POOL_CASE/pool-slot"
+  POOL_PROJ="$POOL_CASE/own-clone"
+  POOL_CONFIG="$POOL_CASE/claude-config"
+  POOL_STORE="$POOL_CONFIG/.claude.json"
+  mkdir -p "$POOL_CONFIG"
+  fm_git_worktree "$POOL_PEER" "$POOL_WT" "wt-$name"
+  origin_url=$(git -C "$POOL_PEER" remote get-url origin)
+  git clone --quiet "$origin_url" "$POOL_PROJ"
+}
+
 # run_trust <config> <worktree> <project> [home]: invoke with an isolated store.
 run_trust() {
   local config=$1 wt=$2 proj=$3 home=${4:-$1}
@@ -483,6 +504,105 @@ test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
   pass "fm-claude-trust.sh: a project argument that is itself a linked worktree resolves to the primary checkout"
 }
 
+# The regression this closes. A secondmate home sharing the primary home's
+# Treehouse pool gets handed slots linked to the primary's clone, so requiring
+# the worktree to share the PROJECT argument's git common dir refused every one
+# of them and left the home unable to launch a claude worker at all. The slot is
+# still a linked worktree of the same repository, so the association holds - and
+# the project-root entry must be the worktree's OWN canonical checkout, the one
+# Claude Code's git-root canonicalization will read for a pane started there,
+# never the <project> argument that named a different clone.
+test_pooled_worktree_from_a_sibling_clone_is_trusted() {
+  local out
+  make_pool_case pool-sibling
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 0 $? "a pooled worktree linked to a sibling clone of the same repository must be trusted: $out"
+  assert_trusted "$POOL_STORE" "$POOL_WT" "the pooled worktree was not recorded as trusted"
+  assert_contains "$out" "$POOL_PEER" \
+    "the outcome did not name the worktree's own canonical checkout as the project root"
+  assert_trust_only_no_import_consent "$POOL_STORE" "$POOL_PEER" \
+    "the worktree's own canonical checkout either lost trust or gained unearned import consent"
+  assert_not_trusted "$POOL_STORE" "$POOL_PROJ" \
+    "the project argument's own clone was written as the project root Claude Code never reads"
+  pass "fm-claude-trust.sh: a pooled worktree linked to a sibling clone of one repository is trusted"
+}
+
+# Consent must follow the entry the running app actually reads, which is the
+# WORKTREE's canonical checkout. Standing consent recorded only against the
+# project argument's own clone is some other checkout's decision and must not be
+# spent here; standing consent on the worktree's own canonical checkout is the
+# same-value refresh the script is allowed to make.
+test_pooled_worktree_import_consent_follows_its_own_canonical_checkout() {
+  local out
+  make_pool_case pool-consent-peer
+  cat > "$POOL_STORE" <<JSON
+{"projects":{"$POOL_PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":true}}}
+JSON
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 0 $? "a pooled worktree must still register when only the other clone approved imports: $out"
+  assert_trust_only_no_import_consent "$POOL_STORE" "$POOL_WT" \
+    "the worktree entry spent import consent recorded against a different clone"
+  assert_trust_only_no_import_consent "$POOL_STORE" "$POOL_PEER" \
+    "the canonical checkout gained import consent recorded against a different clone"
+
+  make_pool_case pool-consent-own
+  cat > "$POOL_STORE" <<JSON
+{"projects":{"$POOL_PEER":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":true}}}
+JSON
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 0 $? "a pooled worktree must carry forward its own canonical checkout's consent: $out"
+  assert_all_flags "$POOL_STORE" "$POOL_WT" \
+    "the worktree entry did not carry the refreshed consent of its own canonical checkout"
+  assert_all_flags "$POOL_STORE" "$POOL_PEER" \
+    "the canonical checkout lost its own already-granted import consent"
+  pass "fm-claude-trust.sh: a pooled worktree's import consent follows its own canonical checkout"
+}
+
+# The decline protection has to move with the consent read, or a pooled slot
+# would silently register trust against a checkout whose human answered "No,
+# disable" - the one outcome the whole consent gate exists to prevent.
+test_pooled_worktree_declined_consent_on_its_canonical_checkout_is_not_overridden() {
+  local out before after
+  make_pool_case pool-decline
+  cat > "$POOL_STORE" <<JSON
+{"projects":{"$POOL_PEER":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true}}}
+JSON
+  before=$(cat "$POOL_STORE")
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 1 $? "a pooled worktree whose canonical checkout declined external imports must be refused: $out"
+  assert_contains "$out" "declined external CLAUDE.md imports" \
+    "the refusal did not name the declined-consent reason"
+  after=$(cat "$POOL_STORE")
+  [ "$before" = "$after" ] || fail "the store was modified despite the refusal"
+  assert_not_trusted "$POOL_STORE" "$POOL_WT" "the pooled worktree was registered despite the refusal"
+  pass "fm-claude-trust.sh: a pooled worktree respects a decline on its own canonical checkout"
+}
+
+# Repository identity is what admits a sibling clone at all, so a checkout whose
+# origin cannot be read leaves that identity unestablished. This refuses like
+# every other failed scope test rather than falling through to accept: an
+# origin-less pair could be two entirely unrelated repositories.
+test_sibling_clone_without_a_readable_origin_is_refused() {
+  local out
+  make_pool_case pool-no-origin
+  git -C "$POOL_PROJ" remote remove origin
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 1 $? "a project whose origin cannot be read must be refused: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_contains "$out" "clones of one repository" "the refusal did not name the unestablished repository identity"
+  assert_not_trusted "$POOL_CONFIG/.claude.json" "$POOL_WT" \
+    "a worktree with no established repository identity was trusted"
+
+  make_pool_case pool-no-peer-origin
+  git -C "$POOL_PEER" remote remove origin
+  out=$(run_trust "$POOL_CONFIG" "$POOL_WT" "$POOL_PROJ")
+  expect_code 1 $? "a worktree whose own checkout has no origin must be refused: $out"
+  assert_contains "$out" "clones of one repository" "the refusal did not name the unestablished repository identity"
+  assert_not_trusted "$POOL_CONFIG/.claude.json" "$POOL_WT" \
+    "a worktree with no established repository identity was trusted"
+  pass "fm-claude-trust.sh: a sibling clone with no readable origin is refused"
+}
+
 test_unrelated_store_content_is_preserved() {
   local rec store
   rec=$(make_case preserve)
@@ -675,6 +795,36 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with a readable brief doorbell"
 }
 
+# The spawn-side guard for the same regression: fm-spawn refuses a claude launch
+# whose trust registration fails, so while a pooled slot linked to a sibling
+# clone was refused this home could not launch a claude worker at all and the
+# work fell through to another harness. The launch must now happen, and it must
+# point the worker at the same store the registration wrote.
+test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone() {
+  local case_dir home fakebin launch_log out
+  case_dir="$TMP_ROOT/spawn-pool"
+  home="$case_dir/home"
+  launch_log="$case_dir/launch.log"
+  make_pool_case spawn-pool-repo
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_test_spawn_brief "$home" poolspawn
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$POOL_CONFIG" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$POOL_WT" "$fakebin" poolspawn "$POOL_PROJ" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a claude spawn into a pooled worktree of a sibling clone must succeed: $out"
+  assert_trusted "$POOL_STORE" "$POOL_WT" \
+    "the claude spawn did not pre-register trust for its pooled worktree"
+  assert_trusted "$POOL_STORE" "$POOL_PEER" \
+    "the claude spawn did not pre-register trust for the worktree's own canonical checkout"
+  assert_present "$launch_log" "the claude spawn sent no launch command"
+  assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
+    "the launch command was not the claude worker launch"
+  assert_grep "CLAUDE_CONFIG_DIR='$POOL_CONFIG'" "$launch_log" \
+    "the launch command did not point the worker at the store that was trusted"
+  pass "fm-spawn.sh: a claude spawn pre-trusts a pooled worktree linked to a sibling clone"
+}
+
 # A secondmate home is the second directory a claude launch starts in, and it is
 # as unseen by Claude as a fresh worktree. The standalone-clone shape is the one
 # that wedged in production: the trust step was skipped for every secondmate, so
@@ -855,6 +1005,10 @@ test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
 test_worktree_subdirectory_is_refused
 test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
+test_pooled_worktree_from_a_sibling_clone_is_trusted
+test_pooled_worktree_import_consent_follows_its_own_canonical_checkout
+test_pooled_worktree_declined_consent_on_its_canonical_checkout_is_not_overridden
+test_sibling_clone_without_a_readable_origin_is_refused
 test_unrelated_store_content_is_preserved
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
@@ -862,6 +1016,7 @@ test_corrupt_store_fails_closed
 test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
+test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone
 test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted
