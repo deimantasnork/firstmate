@@ -60,7 +60,7 @@
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream. config/crew-accounts.json is deliberately NOT in the list either:
-# it names absolute credential-store paths on THIS host, so inheriting it into a
+# it names host-local credential-store paths, so inheriting it into a
 # remote home would point that home's workers at stores that do not exist there;
 # a secondmate home's own stores are pinned per vendor through its launch
 # environment and recorded on its task record instead (docs/configuration.md
