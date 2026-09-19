@@ -176,6 +176,8 @@
 # claude launch verbatim rather than resolving it, and the pane starts in the
 # registered directory, so only an absolute value names the same store on both sides; a
 # relative one is refused below rather than guessed at.
+# With no override, canonical Claude launches clear any pane-inherited
+# CLAUDE_CONFIG_DIR so the worker reads the same default store registered here.
 set -u
 # Path resolution here must answer from the filesystem, never from the caller's
 # environment, because the refusals below are the safety property. CDPATH would

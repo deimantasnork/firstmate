@@ -828,6 +828,104 @@ test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone() {
   pass "fm-spawn.sh: a claude spawn pre-trusts a pooled worktree linked to a sibling clone"
 }
 
+# A secondmate's inherited account store can contain only its project clone's
+# entry, with no slot entry at all. Exercise both pool ownership shapes through
+# spawn, including the secondmate account-selection branch, and pin the exact
+# slot key in the same store the worker launch carries.
+test_secondmate_worker_pretrusts_the_slot_in_its_inherited_store() {
+  local shape task_home proj id launch_log out fakebin
+  for shape in same sibling; do
+    make_pool_case "secondmate-slot-$shape"
+    task_home="$POOL_CASE/home"
+    id="trust-slot-$shape"
+    launch_log="$POOL_CASE/launch.log"
+    proj=$POOL_PROJ
+    [ "$shape" != same ] || proj=$POOL_PEER
+    fm_test_spawn_home "$task_home" claude
+    printf '%s\n' finder-mate > "$task_home/.fm-secondmate-home"
+    fm_test_spawn_brief "$task_home" "$id"
+    fakebin=$(make_spawn_fakebin "$POOL_CASE/fake" claude)
+    cat > "$POOL_STORE" <<JSON
+{"projects":{"$proj":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false}}}
+JSON
+    assert_not_trusted "$POOL_STORE" "$POOL_WT" "the fixture already trusted the pool slot"
+    out=$(FM_TEST_CLAUDE_CONFIG_DIR="$POOL_CONFIG" FM_FAKE_LAUNCH_LOG="$launch_log" \
+      fm_test_run_spawn "$task_home" "$POOL_WT" "$fakebin" "$id" "$proj" claude \
+      --mode no-mistakes --yolo off)
+    expect_code 0 $? "a secondmate's $shape-clone pool spawn must succeed: $out"
+    assert_trust_only_no_import_consent "$POOL_STORE" "$POOL_WT" \
+      "the exact pool-slot key lost trust or gained unearned import consent"
+    assert_trust_only_no_import_consent "$POOL_STORE" "$POOL_PEER" \
+      "the canonical checkout lost trust or gained unearned import consent"
+    assert_store_value "$POOL_STORE" false "the existing clone's import decision changed" \
+      projects "$proj" hasClaudeMdExternalIncludesApproved
+    [ ! -e "$task_home/user-home/.claude.json" ] || fail "trust was written into the default store"
+    assert_grep "CLAUDE_CONFIG_DIR='$POOL_CONFIG'" "$launch_log" \
+      "the worker launch did not carry the store containing the slot's trust entry"
+    assert_grep "$task_home/data/$id/launch-brief.md" "$launch_log" \
+      "the worker launch did not carry its brief"
+    assert_grep "worktree=$POOL_WT" "$task_home/state/$id.meta" \
+      "the registered slot differed from the worker's recorded worktree"
+  done
+  pass "fm-spawn.sh: secondmate workers trust the exact same-clone and sibling-clone pool slot in their inherited store"
+}
+
+# A multiplexer pane can retain a store that the spawning process does not
+# have. Execute the emitted launch under that divergent environment: the worker
+# must read the exact store and key the preflight wrote, including when spawn
+# selected the default store by leaving CLAUDE_CONFIG_DIR unset.
+test_default_store_launch_does_not_inherit_another_pane_store() {
+  local shape task_home proj wt id launch_log fakebin out result expected
+  local -a args
+  for shape in same sibling secondmate; do
+    make_pool_case "pane-store-$shape"
+    task_home="$POOL_CASE/home"
+    id="pane-trust-$shape"
+    launch_log="$POOL_CASE/launch.log"
+    proj=$POOL_PROJ
+    wt=$POOL_WT
+    [ "$shape" != same ] || proj=$POOL_PEER
+    fm_test_spawn_home "$task_home" claude
+    printf '%s\n' finder-mate > "$task_home/.fm-secondmate-home"
+    fm_test_spawn_brief "$task_home" "$id"
+    args=(--mode no-mistakes --yolo off)
+    if [ "$shape" = secondmate ]; then
+      wt="$POOL_CASE/secondmate-home"
+      seed_secondmate_home "$wt" "$id"
+      proj=$wt
+      args=(--secondmate)
+    fi
+    fakebin=$(make_spawn_fakebin "$POOL_CASE/fake" claude)
+    printf '%s\n' '{"projects":{}}' > "$POOL_STORE"
+    out=$(FM_TEST_CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$launch_log" \
+      fm_test_run_spawn "$task_home" "$wt" "$fakebin" "$id" "$proj" claude "${args[@]}")
+    expect_code 0 $? "default-store $shape spawn failed: $out"
+    assert_trusted "$task_home/user-home/.claude.json" "$wt" \
+      "the exact launch path was not registered in the default store"
+    cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+node - "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" "$(pwd -P)" <<'NODE'
+const fs = require('node:fs');
+const [store, cwd] = process.argv.slice(2);
+const config = JSON.parse(fs.readFileSync(store, 'utf8'));
+if (config.projects?.[cwd]?.hasTrustDialogAccepted !== true) {
+  console.error(`worker has no trust for ${cwd} in ${store}`);
+  process.exit(1);
+}
+console.log(store);
+console.log(cwd);
+NODE
+SH
+    result=$(cd "$wt" && HOME="$task_home/user-home" PATH="$fakebin:$PATH" \
+      CLAUDE_CONFIG_DIR="$POOL_CONFIG" /bin/sh -c "$(cat "$launch_log")") \
+      || fail "the $shape worker inherited a different store from the one preflight registered"
+    expected="$task_home/user-home/.claude.json"$'\n'"$wt"
+    [ "$result" = "$expected" ] || fail "the $shape worker read the wrong trust store or workspace: $result"
+    assert_not_trusted "$POOL_STORE" "$wt" "the unrelated pane store was modified"
+  done
+  pass "fm-spawn.sh: default-store Claude launches ignore a different store inherited by the pane"
+}
+
 # A secondmate home is the second directory a claude launch starts in, and it is
 # as unseen by Claude as a fresh worktree. The standalone-clone shape is the one
 # that wedged in production: the trust step was skipped for every secondmate, so
@@ -1020,6 +1118,8 @@ test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone
+test_secondmate_worker_pretrusts_the_slot_in_its_inherited_store
+test_default_store_launch_does_not_inherit_another_pane_store
 test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted

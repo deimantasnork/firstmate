@@ -5406,7 +5406,9 @@ esac
 # credentials Claude ranks above the root's login. With no pin, forward the store
 # this spawn selected - the config/crew-accounts.json choice, or an explicit
 # --account pin - and otherwise fall back to firstmate's own ambient value, so a
-# crewmate uses the same credential/config firstmate is authenticated with.
+# crewmate uses the same credential/config firstmate is authenticated with. A
+# non-empty store is forwarded; Claude's default-store absence is pinned below
+# as well.
 # A secondmate home's two stores are prefixed by its own block below.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
@@ -5470,6 +5472,14 @@ if [ "$KIND" = secondmate ]; then
     LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$sm_claude_store") $LAUNCH"
   fi
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+fi
+# The preflight also selects a store when its override is absent: HOME's
+# .claude.json. A long-lived pane can still carry CLAUDE_CONFIG_DIR, so omitting
+# the prefix would send Claude to another store without the registered slot
+# key or the canonical checkout's consent. Pin that absence for canonical
+# Claude launches, including secondmates; raw commands own their environment.
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" = 0 ] && [ -z "$claude_trust_store" ]; then
+  LAUNCH="env -u CLAUDE_CONFIG_DIR $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
 # rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
