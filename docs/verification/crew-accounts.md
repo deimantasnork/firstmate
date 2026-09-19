@@ -8,7 +8,7 @@ Task chronology and the captain's dispatch decisions stay in the private task re
 
 ## Per-store quota evidence
 
-Verified with `quota-axi` 0.1.x on a host carrying two Codex stores and two Claude stores.
+Verified 2026-09-17 with `quota-axi` 0.1.46 on a host carrying two Codex stores and two Claude stores.
 `quota-axi --help` documents the read this feature depends on: `--profile-only` "requires explicit CLAUDE_CONFIG_DIR or CODEX_HOME plus exactly one matching provider. It reads only that credential file: no Keychain, Pi, CLI RPC, fallback, refresh, or cache."
 
 ```sh
@@ -44,7 +44,7 @@ bin/fm-account-choose.sh --vendor claude --pin <second-account>
 
 - codex: the first account was skipped as `runway exhausted_now at all_models` and the second was selected on its measured `through_reset` headroom, which is the overflowing behavior the captain asked for.
 - claude: the first account was selected with `measured=no`, because its store reported no measurable window; that is fill-first over disclosed uncertainty rather than a block. An operator who wants the other order for that vendor reorders the accounts.
-- the pin run selected the named account with `pin=yes`, ignoring no eligibility rule.
+- the pin run selected the named account with `pin=yes`, bypassing the eligibility rules.
 
 The deterministic half of this evidence is reproducible without any live stores:
 

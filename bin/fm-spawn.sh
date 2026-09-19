@@ -2426,7 +2426,8 @@ fi
 
 # ---- per-account credential selection (config/crew-accounts.json) -------------
 # A subscription account is one named entry in the local, gitignored
-# config/crew-accounts.json holding that account's Codex store and Claude store
+# config/crew-accounts.json holding that account's Codex store, Claude store,
+# or both
 # (docs/configuration.md "Crew accounts" owns the schema). This block picks the
 # account this spawn runs on, before any worktree or endpoint exists, and
 # forwards the chosen store as CODEX_HOME or CLAUDE_CONFIG_DIR so the choice is
@@ -2435,8 +2436,8 @@ fi
 # forwarded verbatim, and an unset one means the CLI's own default store.
 #
 # Precedence per vendor: an explicit --account pin (including the pin recorded
-# for a relaunch), then automatic fill-first selection, and for a secondmate
-# home a store already recorded for that home. A secondmate home is pinned to
+# for a relaunch), then a store already recorded for a secondmate home, then
+# automatic fill-first selection. A secondmate home is pinned to
 # one store per vendor (its own recorded stores), so it never auto-selects: its
 # crewmates inherit the home's stores from the home's own environment, and only
 # an --account that home's own config/crew-accounts.json resolves moves one

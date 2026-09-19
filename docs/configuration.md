@@ -1084,7 +1084,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Crew accounts (config/crew-accounts.json)
 
 `config/crew-accounts.json` is an optional local, gitignored file naming the subscription accounts a codex or claude spawn may run on, so a second paid account is actually spent instead of every worker sharing the CLI's default store.
-The file holds absolute store paths, so it is host-local and is deliberately NOT one of the [inherited local material](#operational-home-layout-and-state) items: each home that should select accounts configures its own file.
+The file holds absolute or `~/`-relative store paths, so it is host-local and is deliberately NOT one of the [inherited local material](#operational-home-layout-and-state) items: each home that should select accounts configures its own file.
 [`bin/fm-account-choose.sh`](../bin/fm-account-choose.sh) is the selection owner and its header owns the probe and output mechanics; this section owns the schema.
 
 ```json
@@ -1129,6 +1129,7 @@ An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch
 A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch and recovery respawn, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
 An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with an existing store directory for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
+A primary cannot pass `--account` through a remote-secondmate spawn because its account file names paths on the primary host; the remote home resolves its stores from its own host-local configuration.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
