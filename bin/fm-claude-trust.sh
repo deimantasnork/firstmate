@@ -12,7 +12,7 @@
 #        fm-claude-trust.sh --secondmate-home <home> <id>
 #        fm-claude-trust.sh --lab-home <home>
 #   <worktree>  the isolated task worktree this spawn launches into
-#   <project>   the primary checkout that worktree belongs to
+#   <project>   a checkout of the repository that worktree belongs to
 #   <home>      the seeded secondmate home this spawn launches into
 #   <id>        the secondmate id that home must already be marked for
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
@@ -51,10 +51,12 @@
 # (`es`/`F1e`) has no such fallback: it reads ONLY the canonical project-root
 # entry, and that root is never the worktree - Claude Code's own git-root
 # canonicalization (`Fr`/`Se`) walks a linked worktree's `.git` file through
-# its `commondir` pointer back to the PRIMARY CHECKOUT, exactly the <project>
-# argument this script already receives for the worktree-mode scope test
-# below. So the trust flag is registered on BOTH the worktree entry (for
-# trust's ancestor-walk fallback and defense in depth) and the project entry
+# its `commondir` pointer back to the PRIMARY CHECKOUT - the WORKTREE'S own
+# canonical checkout, which the worktree-mode scope test below resolves from
+# that same common dir rather than from the <project> argument, because the
+# two are the same path only while they share a clone. So the trust flag is
+# registered on BOTH the worktree entry (for trust's ancestor-walk fallback
+# and defense in depth) and the project entry
 # (the trust check's first, canonical-shaped, look); the two external-imports
 # flags land on those same two entries only when the project entry already
 # carries standing consent (see the consent-gating block below) - the project
@@ -85,23 +87,30 @@
 # different shapes on disk.
 #
 # WORKTREE MODE. <worktree> must be a LINKED git worktree - its own git dir,
-# sharing <project>'s common dir - whose top level is exactly the resolved
-# argument. Git is the ground truth, so the argument is never trusted on its
-# own word: a primary checkout (git dir == common dir), a worktree of an
-# unrelated repo, a subdirectory of a worktree, a plain directory, and a home
-# directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip. When <project> is itself a linked worktree (a
-# secondmate home spawned from, rather than as, the primary checkout),
-# refusing outright would wedge a relaunch that is otherwise perfectly valid:
-# its own common dir already IS the primary checkout's own git dir (git's
-# git-common-dir answer never changes by which worktree asks), so the
-# checkout is derived structurally from it - its parent directory in the
-# standard non-bare, non-GIT_DIR-overridden layout this script already
-# requires elsewhere - and verified, never assumed: the candidate's own
-# resolved git dir must equal that common dir, the same primary-checkout
-# definition used throughout, or this refuses rather than guess. The
-# consent-gated external-imports flags land on that resolved canonical
-# checkout, never on the linked-worktree argument itself.
+# distinct from its common dir - whose top level is exactly the resolved
+# argument, and it must be associated with <project>. Git is the ground truth,
+# so the argument is never trusted on its own word: a primary checkout (git dir
+# == common dir), a worktree of an unrelated repository, a subdirectory of a
+# worktree, a plain directory, and a home directory are each refused. Refusal is
+# a non-zero exit, never a warning and never a silent skip.
+#
+# The association has two forms, and the inline block at the scope test owns
+# which one applies and why. Sharing <project>'s common dir is the first and
+# strongest, and it resolves <project> however it was spelled, including when
+# <project> is itself a linked worktree (a secondmate home spawned from, rather
+# than as, the primary checkout) - refusing that outright would wedge a relaunch
+# that is otherwise perfectly valid. Otherwise the two canonical checkouts must
+# be clones of one origin, which is what a Treehouse pool shared between a
+# secondmate home's clone and the primary home's produces: treehouse pools by
+# repository rather than by clone, so a free slot handed out there is a genuine
+# linked worktree of the same repository owned by the OTHER clone, and refusing
+# it left such a home unable to run a claude worker at all.
+#
+# The trust and consent-gated external-imports flags land on the WORKTREE'S own
+# canonical checkout - its common dir's primary checkout, derived structurally
+# and verified rather than assumed - never on the <project> argument and never
+# on a linked-worktree argument itself, because that canonical checkout is the
+# one entry Claude Code's own canonicalization reads for this worktree.
 #
 # The test is deliberately NOT a treehouse or orca path prefix. Treehouse's
 # root is configurable (--root, TREEHOUSE_ROOT, config, and a relative
@@ -244,6 +253,58 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
+# The primary checkout that owns a git common dir - the one path every linked
+# worktree of that repository canonicalizes to - or empty when it cannot be
+# established. A primary checkout keeps the common dir as its OWN git dir, so
+# the candidate is that dir's parent in the standard non-bare,
+# non-GIT_DIR-overridden layout this script already requires elsewhere, and it
+# is verified rather than assumed: the candidate's own resolved git dir must be
+# exactly the common dir, or this answers nothing and the caller refuses.
+canonical_checkout_of() { # <common-dir>
+  local common=$1 candidate candidate_git
+  candidate=$(real_dir "$(dirname -- "$common")") || return 1
+  [ -n "$candidate" ] || return 1
+  candidate_git=$(git -C "$candidate" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  candidate_git=$(real_dir "$candidate_git") || return 1
+  [ -n "$candidate_git" ] && [ "$candidate_git" = "$common" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
+# Which repository a checkout is a clone OF, so two separate clones of one
+# repository can be recognised as the same project. This is the identity rule
+# bin/fm-wake-lib.sh's fm_treehouse_project_lock_path already uses to give
+# separate clones of one origin a single Treehouse pool lock, which is the same
+# question asked here and the reason the two clones can be handed slots from one
+# pool at all; it is restated rather than sourced because fm-wake-lib.sh resolves
+# FM_HOME and creates a state directory at source time, and this script's
+# refusals must answer from the filesystem alone, never from the caller's
+# environment. A local filesystem origin resolves to its real path so two
+# spellings of one path agree; a URL is compared as written. Empty when the
+# checkout has no origin, which the caller treats as identity that cannot be
+# established rather than as a match.
+origin_identity_of() { # <checkout>
+  local dir=$1 origin resolved
+  origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$origin" ] || return 1
+  case "$origin" in
+    /*)
+      if [ -d "$origin" ]; then
+        resolved=$(real_dir "$origin") || return 1
+        origin=$resolved
+      fi
+      ;;
+    *://* | *:*) ;;
+    *)
+      if [ -d "$dir/$origin" ]; then
+        resolved=$(real_dir "$dir/$origin") || return 1
+        origin=$resolved
+      fi
+      ;;
+  esac
+  [ -n "$origin" ] || return 1
+  printf '%s\n' "$origin"
+}
+
 TARGET_REAL=$(real_dir "$TARGET_ARG") || true
 [ -n "$TARGET_REAL" ] || refuse "$SCOPE_NOUN '$TARGET_ARG' is not an accessible directory"
 if [ "$MODE" = worktree ]; then
@@ -298,7 +359,6 @@ if [ "$MODE" = worktree ]; then
 
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
 
   # The external-imports flags must land on the primary checkout - its own git
   # dir equals the common dir - because that is exactly the path Claude Code's
@@ -307,12 +367,9 @@ if [ "$MODE" = worktree ]; then
   # rather than as, the primary checkout), refusing outright would wedge a
   # relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
   # primary checkout's own git dir (git's git-common-dir answer never changes
-  # by which worktree asks), so the checkout is derived structurally from it -
-  # its parent directory in the standard non-bare, non-GIT_DIR-overridden
-  # layout this script already requires elsewhere - and verified, never
-  # assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
-  # same primary-checkout definition used above, or this refuses rather than
-  # guess.
+  # by which worktree asks), so the checkout is derived structurally from it
+  # and verified rather than assumed - canonical_checkout_of owns that
+  # derivation - or this refuses rather than guess.
   PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
   [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
   PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
@@ -320,13 +377,52 @@ if [ "$MODE" = worktree ]; then
   if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
     PROJ_CANON=$PROJ_REAL
   else
-    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
+    PROJ_CANON=$(canonical_checkout_of "$PROJ_COMMON") || true
     [ -n "$PROJ_CANON" ] \
       || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
-    CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
-    CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
-    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+  fi
+
+  # ASSOCIATING THE WORKTREE WITH THE PROJECT. Sharing <project>'s common dir is
+  # the strongest form of the association and stays the first answer: the
+  # worktree is then literally a worktree of that clone, so the canonical
+  # checkout just resolved for <project> is equally the worktree's own and this
+  # path behaves exactly as it always has.
+  #
+  # A SHARED TREEHOUSE POOL BREAKS THAT EQUALITY WITHOUT BREAKING THE
+  # ASSOCIATION. Treehouse pools by repository, not by clone, so two clones of
+  # one repository - a secondmate home's own clone and the primary home's -
+  # share a single pool, and `treehouse get` hands the caller whichever slot is
+  # free, including one linked to the OTHER clone. That slot is a genuine linked
+  # worktree of the same repository and is exactly the directory this spawn will
+  # launch into; refusing it left a secondmate home unable to run a claude
+  # worker at all. So when the common dirs differ, the association falls back to
+  # repository identity: both canonical checkouts must be clones of one origin.
+  # That is the same identity Firstmate already uses to give separate clones of
+  # one origin a single Treehouse pool lock, so the clones that can be handed
+  # slots from one pool are exactly the ones accepted here. An origin that
+  # cannot be read on either side is identity that cannot be established, and
+  # refuses like any other failed scope test.
+  #
+  # The consent basis is unchanged by this, and is the reason the flags follow
+  # CANON_ROOT: the entry read, gated and refreshed is the one Claude Code's own
+  # canonicalization will read for THIS worktree, so a pooled slot spends
+  # exactly the standing consent its own canonical checkout already carries -
+  # never the <project> argument's - and an explicit decline recorded there
+  # still refuses the whole registration.
+  if [ "$WT_COMMON" = "$PROJ_COMMON" ]; then
+    CANON_ROOT=$PROJ_CANON
+  else
+    CANON_ROOT=$(canonical_checkout_of "$WT_COMMON") || true
+    [ -n "$CANON_ROOT" ] \
+      || refuse "'$TARGET_REAL' is a linked worktree of another checkout whose primary checkout could not be resolved, so it cannot be shown to be a worktree of project '$PROJ_REAL'"
+    WT_ORIGIN=$(origin_identity_of "$CANON_ROOT") || true
+    PROJ_ORIGIN=$(origin_identity_of "$PROJ_CANON") || true
+    [ -n "$WT_ORIGIN" ] \
+      || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL': it belongs to a different checkout ('$CANON_ROOT') whose origin cannot be read, so they cannot be shown to be clones of one repository"
+    [ -n "$PROJ_ORIGIN" ] \
+      || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL': it belongs to a different checkout ('$CANON_ROOT') and the project's origin cannot be read, so they cannot be shown to be clones of one repository"
+    [ "$WT_ORIGIN" = "$PROJ_ORIGIN" ] \
+      || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL': it belongs to '$CANON_ROOT', a checkout of '$WT_ORIGIN' rather than of '$PROJ_ORIGIN'"
   fi
 elif [ "$MODE" = lab-home ]; then
   LAB_MARKER="$TARGET_REAL/$FM_GATE_LAB_MARKER"
@@ -455,7 +551,7 @@ fi
 TRUST_FLAG='hasTrustDialogAccepted'
 IMPORT_FLAGS='["hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"]'
 if [ "$MODE" = worktree ]; then
-  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "$PROJ_CANON" "$TRUST_FLAG" "$IMPORT_FLAGS")
+  WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "$CANON_ROOT" "$TRUST_FLAG" "$IMPORT_FLAGS")
 else
   WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "" "$TRUST_FLAG" "$IMPORT_FLAGS")
 fi
@@ -581,7 +677,7 @@ process.exit(1);
 NODE
 then
   if [ "$MODE" = worktree ]; then
-    refuse "could not record trust for '$TARGET_REAL' and project '$PROJ_CANON' in '$STORE'"
+    refuse "could not record trust for '$TARGET_REAL' and project '$CANON_ROOT' in '$STORE'"
   else
     refuse "could not record trust for '$TARGET_REAL' in '$STORE'"
   fi
@@ -589,5 +685,5 @@ fi
 
 echo "trusted: $TARGET_REAL"
 if [ "$MODE" = worktree ]; then
-  echo "trusted (project root): $PROJ_CANON"
+  echo "trusted (project root): $CANON_ROOT"
 fi
