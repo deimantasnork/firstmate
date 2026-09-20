@@ -674,6 +674,26 @@ It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact fl
 It spends no model tokens, so it runs by default wherever Codex is installed.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
+## Codex catalog efforts
+
+Verified on 2026-09-20 with codex-cli 0.155.1 using its installed model catalog and the launch commands captured from `bin/fm-spawn.sh`.
+The live guard chooses a catalog model advertising both `max` and `xhigh`, verifies both effort flags reach the launch, and asks the installed CLI to parse those flags through `features list`, without submitting a model prompt.
+An unavailable catalog or one with no matching model fails with the installed Codex version.
+
+```sh
+env -u TYPESAFE_API_KEY bin/fm-test-run.sh tests/fm-bootstrap.test.sh tests/fm-dispatch-resolve.test.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+ok - codex codex-cli 0.155.1 accepts catalog-backed gpt-5.6-sol max launch flags
+ok - codex codex-cli 0.155.1 accepts catalog-backed gpt-5.6-sol xhigh launch flags
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=325817
+```
+
+The portable cases cover Astra `max` and `xhigh`, Luna and an unfamiliar catalog model, missing or malformed catalogs, exact model matching, and Codex `ultra` refusal even when advertised.
+The spawn cases also distinguish the selected account's catalog from the ambient catalog for ordinary workers and secondmates.
+`bin/fm-codex-models-lib.sh` owns capability discovery; [crew dispatch configuration](../configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns operator guidance.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

@@ -74,6 +74,8 @@ make_spawn_case() {
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" "$harness"
+  mkdir -p "$home/codex"
+  cp "$ROOT/tests/fixtures/codex/models_cache.json" "$home/codex/models_cache.json"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   for id in "$@"; do
     fm_test_spawn_brief "$home" "$id"
@@ -552,20 +554,27 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_threads_model_and_max_effort() {
-  local rec id out status launch
-  id=profile-codex-max-z4
-  rec=$(make_spawn_case profile-codex-max codex "$id")
-  read_case_record "$rec"
+test_codex_threads_catalog_efforts() {
+  local rec id out status launch model effort
+  while read -r model effort; do
+    id="profile-codex-$model-$effort"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
-  status=$?
-  expect_code 0 "$status" "codex Luna spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread Luna's max reasoning effort config"
-  pass "codex Luna receives --model and model_reasoning_effort max profile flags"
+    out=$(FM_TEST_CODEX_HOME="$HOME_DIR/codex" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort "$effort")
+    status=$?
+    expect_code 0 "$status" "codex $model spawn with $effort effort should succeed: $out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" "$effort"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex --model '$model' -c 'model_reasoning_effort=\"$effort\"' --dangerously-bypass-approvals-and-sandbox" \
+      "codex launch did not thread $model's $effort reasoning effort config"
+  done <<'ROWS'
+gpt-5.6-luna max
+gpt-6-astra max
+gpt-6-astra xhigh
+future-catalog-model max
+ROWS
+  pass "codex passes catalog-advertised max for any model and preserves Astra xhigh"
 }
 
 test_codex_omits_max_effort_for_unsupported_model() {
@@ -574,7 +583,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   rec=$(make_spawn_case profile-codex-max-unsupported codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(FM_TEST_CODEX_HOME="$HOME_DIR/codex" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
   expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
@@ -583,6 +592,25 @@ test_codex_omits_max_effort_for_unsupported_model() {
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
+}
+
+test_codex_omits_unproven_catalog_max() {
+  local rec id out status launch catalog n=0
+  for catalog in missing '{' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"xhigh"}]}]}'; do
+    n=$((n + 1))
+    id="profile-codex-unproven-$n"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    if [ "$catalog" = missing ]; then rm -f "$HOME_DIR/codex/models_cache.json"
+    else printf '%s\n' "$catalog" > "$HOME_DIR/codex/models_cache.json"; fi
+    out=$(FM_TEST_CODEX_HOME="$HOME_DIR/codex" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-astra --effort max)
+    status=$?
+    expect_code 0 "$status" "unproven max still permits spawn: $out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-astra max
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" model_reasoning_effort "unproven max must be omitted"
+  done
+  pass "codex omits max when its catalog is missing, malformed, or lacks the capability"
 }
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
@@ -1980,11 +2008,13 @@ test_codex_spawn_forwards_the_selected_account_store() {
   write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  cp "$ROOT/tests/fixtures/codex/models_cache.json" "$codex_b/models_cache.json"
 
-  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-astra --effort max)
   status=$?
   expect_code 0 "$status" "a codex spawn with accounts configured should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'model_reasoning_effort="max"' "selected account catalog must authorize Astra max"
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the selected account's store was not forwarded"
   assert_not_contains "$launch" "$codex_a" "the exhausted account's store was forwarded anyway"
   meta="$HOME_DIR/state/$id.meta"
@@ -1992,6 +2022,32 @@ test_codex_spawn_forwards_the_selected_account_store() {
   assert_no_grep "account_pin=" "$meta" "an automatic choice was recorded as an explicit pin"
   assert_contains "$out" "account: vendor=codex account=secondary" "the spawn did not report its account evidence"
   pass "a codex spawn forwards and records the account selected for it"
+}
+
+test_codex_selected_account_without_max_omits_it() {
+  local rec id out launch codex_a codex_b claude_a claude_b
+  id=account-codex-no-max
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  codex_a="$CASE_DIR/store-codex-a"
+  codex_b="$CASE_DIR/store-codex-b"
+  claude_a="$CASE_DIR/store-claude-a"
+  claude_b="$CASE_DIR/store-claude-b"
+  write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
+  write_account_store "$claude_a" "$(account_store_json claude 80 through_reset)"
+  write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
+  write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  # Ambient Astra supports max; the selected account's catalog does not.
+  printf '%s\n' '{"models":[]}' > "$codex_b/models_cache.json"
+  out=$(FM_TEST_CODEX_HOME="$HOME_DIR/codex" FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-astra --effort max)
+  expect_code 0 "$?" "selected account without max still launches: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_b'" "selected account store missing"
+  assert_not_contains "$launch" model_reasoning_effort "ambient catalog must not authorize selected account max"
+  pass "codex max uses the selected account catalog instead of the ambient catalog"
 }
 
 test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
@@ -2209,11 +2265,13 @@ test_secondmate_spawn_records_one_store_per_vendor() {
   write_account_store "$claude_b" "$(account_store_json claude 90 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  cp "$ROOT/tests/fixtures/codex/models_cache.json" "$codex_b/models_cache.json"
 
-  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --model gpt-6-astra --effort max)
   status=$?
   expect_code 0 "$status" "a secondmate spawn with accounts configured should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'model_reasoning_effort="max"' "selected account catalog must authorize Astra max"
   # Fill-first per vendor, independently: codex overflows to the second account
   # while claude keeps the first one.
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the secondmate's codex store was not forwarded"
@@ -2312,8 +2370,9 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_threads_model_and_max_effort
+test_codex_threads_catalog_efforts
 test_codex_omits_max_effort_for_unsupported_model
+test_codex_omits_unproven_catalog_max
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort
@@ -2357,6 +2416,7 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_codex_spawn_forwards_the_selected_account_store
+test_codex_selected_account_without_max_omits_it
 test_claude_spawn_selects_per_dispatch_over_an_ambient_store
 test_explicit_account_pin_is_forwarded_and_recorded
 test_harnesses_without_a_configured_vendor_are_untouched
