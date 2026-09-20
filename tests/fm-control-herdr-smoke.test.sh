@@ -324,4 +324,117 @@ case "$OUT" in
 esac
 pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
 
+# A Pi secondmate on Herdr has a structurally different composer from the
+# bordered Claude/Codex prompt above: its writable region is between a pair of
+# separators, and its only idle mark is the inverse-video cursor.  Keep this
+# real-Herdr control-plane check beside the generic unknown-composer guard so a
+# change to either the Pi classifier or its dispatch cannot strand an otherwise
+# idle secondmate behind an unknown verdict again.
+PI_RUNNER="$SCRATCH/pi-composer"
+cat > "$PI_RUNNER" <<'SH'
+#!/usr/bin/env bash
+case "${FM_TEST_PI_COMPOSER:-}" in
+  empty)
+    printf '\033[0m\033[38;2;129;162;190m─────────────────────────────────────────────────────\033[0m\n'
+    printf '\033[0m\033[7m \033[0m                                                    \n'
+    printf '\033[0m\033[38;2;129;162;190m─────────────────────────────────────────────────────\033[0m\n'
+    ;;
+  pending)
+    printf '\033[0m\033[38;2;129;162;190m─────────────────────────────────────────────────────\033[0m\n'
+    printf 'preserve this secondmate draft\033[7m \033[0m\n'
+    printf '\033[0m\033[38;2;129;162;190m─────────────────────────────────────────────────────\033[0m\n'
+    ;;
+  *) exit 2 ;;
+esac
+while IFS= read -r line; do
+  [ "$line" != /quit ] || exit 0
+done
+SH
+chmod +x "$PI_RUNNER"
+printf -v PI_RUNNER_Q '%q' "$PI_RUNNER"
+
+start_pi_secondmate() {  # <empty|pending>
+  local composer=$1
+  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" \
+    "FM_TEST_PI_COMPOSER=$composer bash -c 'exec -a pi bash \"\$1\"' bash $PI_RUNNER_Q" \
+    || fail "could not start the Pi secondmate fixture"
+  wait_process_state agent 50 \
+    || version_fail "the Pi secondmate fixture reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"
+  herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent pi \
+    --state idle --session "$SESSION" >/dev/null 2>&1 \
+    || fail "could not register the Pi secondmate fixture"
+}
+
+set_pi_secondmate_meta() {
+  awk -F= '
+    $1 == "harness" { $0 = "harness=pi" }
+    $1 == "kind" { $0 = "kind=secondmate" }
+    { print }
+  ' "$HOME_DIR/state/hsmoke.meta" > "$HOME_DIR/state/hsmoke.meta.tmp"
+  mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
+}
+
+run_control_with_unreadable_composer() {
+  env PATH="$READ_FAIL_BIN:$PATH" FM_HERDR_REAL="$HERDR_BIN" \
+    FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
+    "$ROOT/bin/fm-control.sh" "$@" 2>&1
+}
+
+set_pi_secondmate_meta
+
+# The positive regression: an actual Herdr pane holding Pi's native idle
+# separator shape is safe to exit, rather than degrading to unknown and
+# permanently refusing the only control-plane restart route.
+start_pi_secondmate empty
+OUT=$(run_control hsmoke exit) \
+  || fail "exit should proceed for an empty Pi secondmate composer: $OUT"
+case "$OUT" in
+  "stopped hsmoke harness=pi backend=herdr"*) : ;;
+  *) fail "an empty Pi secondmate composer should stop through the control plane, got: $OUT" ;;
+esac
+[ "$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")" = dead ] \
+  || fail "a Pi secondmate exited through the control plane did not become dead"
+pass "real herdr: an empty Pi secondmate composer permits the control-plane quit"
+
+# An occupied Pi separator region remains a visible draft, so /quit must not
+# be concatenated onto it.  The process staying alive proves the refusal came
+# before lifecycle input reached the pane.
+start_pi_secondmate pending
+if OUT=$(run_control hsmoke exit 2>&1); then
+  fail "exit should refuse a Pi secondmate composer holding pending text: $OUT"
+fi
+case "$OUT" in
+  *"composer visibly holds pending text"*) : ;;
+  *) fail "a pending Pi secondmate composer should name pending text, got: $OUT" ;;
+esac
+[ "$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")" = alive ] \
+  || fail "a pending Pi secondmate composer refusal should leave the agent alive"
+pass "real herdr: a pending Pi secondmate composer refuses quit before input delivery"
+
+# Keep the separate unreadable direction explicit.  The wrapper preserves
+# every real Herdr operation except pane reads, so agent liveness is proven
+# first and only the composer's ANSI and plain captures fail.
+HERDR_BIN=$(command -v herdr) || fail "could not resolve the real herdr binary"
+READ_FAIL_BIN="$SCRATCH/read-fail-bin"
+mkdir -p "$READ_FAIL_BIN"
+cat > "$READ_FAIL_BIN/herdr" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = pane ] && [ "${2:-}" = read ]; then
+  exit 1
+fi
+exec "$FM_HERDR_REAL" "$@"
+SH
+chmod +x "$READ_FAIL_BIN/herdr"
+if OUT=$(run_control_with_unreadable_composer hsmoke exit 2>&1); then
+  fail "exit should refuse when a live Pi secondmate composer cannot be read: $OUT"
+fi
+case "$OUT" in
+  *"not proven empty"*) : ;;
+  *) fail "an unreadable Pi secondmate composer should name the unproven state, got: $OUT" ;;
+esac
+[ "$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")" = alive ] \
+  || fail "an unreadable Pi secondmate composer refusal should leave the agent alive"
+pass "real herdr: an unreadable Pi secondmate composer refuses quit before input delivery"
+
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
