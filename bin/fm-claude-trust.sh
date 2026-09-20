@@ -7,6 +7,9 @@
 # checkout already holds standing consent for it - see the consent-gating
 # block below for why that dialog is otherwise left for the worker to wedge
 # on rather than answered on the human's behalf.
+# Both modes also complete first-run onboarding in the same atomic write:
+# hasCompletedOnboarding is set to true, and an absent theme defaults to "auto".
+# An explicitly stored theme is preserved.
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
@@ -156,7 +159,8 @@
 # Only the launching user's own store is written. In worktree mode: the
 # projects entries for the worktree path and the resolved canonical project
 # path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
-# file this uid owns; every unrelated key and project entry is preserved, and
+# file this uid owns; apart from the onboarding defaults above, every unrelated
+# key and project entry is preserved, and
 # both entries land in one atomic replacement. In secondmate-home mode: the
 # single projects entry for the registered home path, same store, same atomic
 # replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the claude launch
@@ -596,6 +600,8 @@ const attempt = () => {
     setFlags(projects, target, [trustFlag]);
     keys = [[target, [trustFlag]]];
   }
+  root.hasCompletedOnboarding = true;
+  if (root.theme === undefined) root.theme = "auto";
   // Unpredictable name plus an exclusive create: the config directory may be
   // writable by another local account, and a predictable path could be
   // pre-created there as a symlink that a plain write would follow into some
@@ -617,7 +623,9 @@ const attempt = () => {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
   const back = JSON.parse(fs.readFileSync(store, "utf8"));
-  const landed = keys.every(([key, flags]) => flagsLanded(back.projects, key, flags));
+  const landed = back.hasCompletedOnboarding === true &&
+    JSON.stringify(back.theme) === JSON.stringify(root.theme) &&
+    keys.every(([key, flags]) => flagsLanded(back.projects, key, flags));
   return landed ? "recorded" : "dropped";
 };
 try {
