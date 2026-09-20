@@ -246,6 +246,9 @@ An unconverged opt-out keeps the default projection in that home until convergen
 
 Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
 A presentation journal is the per-task record in this home's `state/` that binds a task to its projected workspace.
+An operator may therefore see one projected task represented in three places at once: a disposable workspace in the Spaces section, an agent row in the Agents section, and the task label on the pane border.
+These views answer different questions - where the task is, which agent owns it, and which pane is visible - so the repeated task label is intentional and does not indicate duplicate tasks.
+Herdr's `show_agent_labels_on_pane_borders` setting controls the pane-border copy, while `hide_tab_bar_when_single_tab` reduces tab-bar repetition when a projected workspace contains only one tab.
 
 Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
 Creation proceeds in this order:
