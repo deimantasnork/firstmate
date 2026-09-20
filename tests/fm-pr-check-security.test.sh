@@ -2096,6 +2096,54 @@ seed_canonical_poll() {
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
 }
 
+test_merge_poll_accepts_relaunch_metadata_without_weakening_identity() {
+  local dir state url provider mutation rc
+  for provider in github gitlab; do
+    case "$provider" in
+      github) url=https://github.com/o/r/pull/1 ;;
+      gitlab) url=https://gitlab.example/group/project/-/merge_requests/1 ;;
+    esac
+    dir=$(make_case "relaunch-metadata-$provider")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a "$url" 'control_relaunch_tx=123.20260920T000000Z.456'
+    if [ "$provider" = github ]; then
+      printf 'pr_head=%s\n' 0123456789abcdef0123456789abcdef01234567 >> "$state/task-a.meta"
+    fi
+    seed_canonical_poll "$dir" task-a "$url"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "poll rejected a transaction marker before PR metadata"
+
+    # Move only the marker, matching the metadata published by fm-control's
+    # replacement launch; the previously registered poll stays untouched.
+    sed '/^control_relaunch_tx=/d' "$state/task-a.meta" > "$dir/relaunched.meta"
+    printf 'control_relaunch_tx=123.20260920T000000Z.456\n' >> "$dir/relaunched.meta"
+    cp "$dir/relaunched.meta" "$state/task-a.meta"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "poll rejected a transaction marker after PR metadata"
+
+    for mutation in "pr=$url" 'pr_head=invalid' 'window=unexpected' 'unexpected continuation'; do
+      printf '%s\n' "$mutation" >> "$state/task-a.meta"
+      ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+        || fail "relaunch tolerance accepted invalid trailing metadata: $mutation"
+      cp "$dir/relaunched.meta" "$state/task-a.meta"
+    done
+    sed "s|^pr=.*|pr=${url%/*}/2|" "$dir/relaunched.meta" > "$state/task-a.meta"
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "relaunch tolerance accepted a different canonical PR identity"
+    cp "$dir/relaunched.meta" "$state/task-a.meta"
+
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      FM_TEST_GH_STATE=MERGED FM_TEST_GLAB_STATE=merged \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "relaunch metadata watcher failed: $(cat "$dir/watch.err")"
+    [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
+      || fail "relaunch metadata prevented the registered poll's merged wake: $(cat "$dir/watch.out")"
+    assert_poll_absent "$state" task-a
+  done
+  pass "relaunch metadata preserves GitHub and GitLab merged wakes while invalid identities stay refused"
+}
+
 add_stop_custom_check() {
   local dir=$1 state
   state="$dir/home/state"
@@ -3440,6 +3488,7 @@ SH
 }
 
 test_parser_matrix
+test_merge_poll_accepts_relaunch_metadata_without_weakening_identity
 test_gitlab_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision

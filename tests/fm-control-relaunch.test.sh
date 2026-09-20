@@ -27,6 +27,7 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -487,6 +488,42 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_preserves_registered_merge_poll() {
+  local dir state head out rc attempt artifact
+  for head in '' 0123456789abcdef0123456789abcdef01234567; do
+    dir=$(new_case registered-merge-poll rl-pr)
+    add_ship_task "$dir" rl-pr claude
+    state="$dir/home/state"
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19' >> "$state/rl-pr.meta"
+    [ -z "$head" ] || printf 'pr_head=%s\n' "$head" >> "$state/rl-pr.meta"
+    fm_pr_poll_prepare "$state" rl-pr github https://github.com/example/repo/pull/19 \
+      github.com example/repo 19 "$ROOT/bin/fm-pr-poll.sh" \
+      || fail "could not prepare a merge poll before relaunch"
+    fm_pr_poll_publish_prepared || fail "could not register a merge poll before relaunch"
+    fm_pr_poll_artifacts_valid "$state" rl-pr "$ROOT/bin/fm-pr-poll.sh" \
+      || fail "merge poll was invalid before relaunch"
+    for artifact in check.sh pr-poll pr-poll-registration; do
+      cp "$state/rl-pr.$artifact" "$dir/$artifact.before"
+    done
+
+    for attempt in 1 2; do
+      out=$(run_control "$dir" rl-pr relaunch --note "continue monitoring the registered merge"); rc=$?
+      expect_code 0 "$rc" "relaunch with a registered merge poll should succeed"$'\n'"$out"
+      [ -n "$(meta_field "$dir" rl-pr control_relaunch_tx)" ] \
+        || fail "relaunch did not publish its transaction marker"
+      [ "$(meta_field "$dir" rl-pr pr_head)" = "$head" ] \
+        || fail "relaunch changed the recorded PR head"
+      for artifact in check.sh pr-poll pr-poll-registration; do
+        cmp -s "$state/rl-pr.$artifact" "$dir/$artifact.before" \
+          || fail "relaunch changed the registered merge poll's $artifact"
+      done
+      fm_pr_poll_artifacts_valid "$state" rl-pr "$ROOT/bin/fm-pr-poll.sh" \
+        || fail "relaunch $attempt broke authentication of the registered merge poll"
+    done
+  done
+  pass "fm-control relaunch: repeated replacement keeps registered merge polls valid with or without a PR head"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2390,6 +2427,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_preserves_registered_merge_poll
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

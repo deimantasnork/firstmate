@@ -388,6 +388,10 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      control_relaunch_tx=*)
+        # fm-spawn --relaunch appends this marker after preserved PR fields.
+        # It is not part of the PR identity, just like the Relay fields below.
+        ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)
