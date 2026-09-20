@@ -44,6 +44,9 @@
 #          syncs or inheritance failures for live secondmate homes, plus
 #          quarantine diagnostics for divergent shared captain-preference
 #          copies; no-op/current and successful updates stay quiet.
+#          Local inheritance revalidates each discovered record and reports an
+#          unsafe or unaccounted-for home before skipping it; remote records
+#          belong exclusively to the remote convergence leg.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -529,11 +532,18 @@ secondmate_sync() {
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
-    validate_secondmate_home "$id" "$home" || continue
+    if grep -q '^remote_host=.' "$_meta" 2>/dev/null; then continue; fi
+    if ! validate_secondmate_home "$id" "$home"; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance home validation failed: $VALIDATION_ERROR"
+      continue
+    fi
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
       *" $home_real "*) ;;
-      *) continue ;;
+      *)
+        echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance home was not admitted by the local sync sweep; inspect metadata and home changes"
+        continue
+        ;;
     esac
     case " $propagated_homes " in
       *" $home_real "*) continue ;;

@@ -517,6 +517,8 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+# A discovered id with a missing home or the primary code root reports a skip;
+# neither case grants admission to the inherited-material sweep.
 #
 # Two optional caller hooks fire from here, each at most once per resolved home:
 #   fm_ff_after_instruction_update <id> <home> <window> <instr>
@@ -534,10 +536,16 @@ FF_SEEN_HOMES=""
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0
-  [ -n "$home" ] || return 0
+  [ -n "$home" ] || {
+    echo "secondmate $id: skipped: missing home in metadata and registry"
+    return 0
+  }
   fm_root_real=$(resolve_path "$FM_ROOT")
   home_real=$(resolve_path "$home")
-  [ "$home_real" != "$fm_root_real" ] || return 0
+  [ "$home_real" != "$fm_root_real" ] || {
+    echo "secondmate $id: skipped: unsafe home: secondmate home cannot be the firstmate repo"
+    return 0
+  }
   if ! validate_secondmate_home "$id" "$home"; then
     echo "secondmate $id: skipped: unsafe home: $VALIDATION_ERROR"
     return 0
