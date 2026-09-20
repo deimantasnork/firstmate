@@ -221,6 +221,23 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The generated worker contract must enumerate inbox records with find so it
+# still works when the worker has disabled pathname expansion with `set -f`.
+test_instruction_inbox_is_noglob_safe() {
+  local home brief
+  home="$TMP_ROOT/inbox-noglob-home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" inbox-noglob firstmate --mode local-only >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to scaffold the inbox noglob fixture"
+  brief="$home/data/inbox-noglob/brief.md"
+  assert_grep "find '$home/state/inbox-noglob.inbox' -maxdepth 1 -type f -name '*.msg'" \
+    "$brief" "generated inbox instruction does not use find for message enumeration"
+  assert_grep "mv '$home/state/inbox-noglob.inbox'/NNN.msg '$home/state/inbox-noglob.inbox'/handled/" \
+    "$brief" "generated inbox instruction lost acknowledge-by-move"
+  assert_no_grep "list '$home/state/inbox-noglob.inbox'/*.msg" \
+    "$brief" "generated inbox instruction still relies on pathname expansion"
+  pass "fm-brief.sh: generated instruction inbox is safe with pathname expansion disabled"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -1329,6 +1346,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_instruction_inbox_is_noglob_safe
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
