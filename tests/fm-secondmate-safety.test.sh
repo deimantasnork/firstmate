@@ -102,6 +102,54 @@ test_lock_status_is_per_home() {
   pass "fm-lock status is scoped per home"
 }
 
+test_seed_state_permissions() {
+  local seed_path seed_umask home subhome manifest mode
+  manifest="$TMP_ROOT/state-permissions.manifest"
+  printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
+    "$(printf domain | base64 | tr -d '\n')" \
+    "$(printf 'State permissions test.\n' | base64 | tr -d '\n')" > "$manifest"
+
+  # lib.sh pins 022, which masks the production failure on hosts using 0002.
+  for seed_path in local remote; do
+    for seed_umask in 0000 0002 0022 0077; do
+      home="$TMP_ROOT/state-permissions-$seed_path-$seed_umask-parent"
+      subhome="$(cd "$TMP_ROOT" && pwd -P)/state-permissions-$seed_path-$seed_umask-child"
+      mkdir -p "$home/data" "$home/state"
+      mark_firstmate_home "$subhome"
+      (
+        umask "$seed_umask"
+        if [ "$seed_path" = local ]; then
+          FM_HOME="$home" FM_SECONDMATE_CHARTER='State permissions test.' \
+            "$ROOT/bin/fm-home-seed.sh" domain "$subhome" --no-projects >/dev/null
+        else
+          FM_HOME="$subhome" "$ROOT/bin/fm-remote-home-provision.sh" < "$manifest" >/dev/null
+        fi
+      ) || fail "$seed_path seed failed under umask $seed_umask"
+      mode=$(file_mode "$subhome/state")
+      [ "$mode" = 700 ] || fail "$seed_path seed created state mode $mode under umask $seed_umask"
+      FM_HOME="$subhome" FM_STATE_OVERRIDE="$subhome/state" "$ROOT/bin/fm-procevent.sh" list >/dev/null \
+        || fail "process-event guard rejected $seed_path seed under umask $seed_umask"
+
+      # Reseeding preserves existing state and its accepted access policy.
+      printf 'preserve state\n' > "$subhome/state/seed-canary"
+      for mode in 700 755; do
+        chmod "$mode" "$subhome/state"
+        (
+          umask 0002
+          if [ "$seed_path" = local ]; then
+            FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" domain "$subhome" --no-projects >/dev/null
+          else
+            FM_HOME="$subhome" "$ROOT/bin/fm-remote-home-provision.sh" < "$manifest" >/dev/null
+          fi
+        ) || fail "$seed_path reseed failed with existing state mode $mode"
+        [ "$(file_mode "$subhome/state")" = "$mode" ] || fail "$seed_path reseed changed existing state permissions"
+        [ "$(cat "$subhome/state/seed-canary")" = 'preserve state' ] || fail "$seed_path reseed changed existing state"
+      done
+    done
+  done
+  pass "local and remote seeds create private state regardless of umask and preserve existing state"
+}
+
 test_seed_allows_overlapping_clones_and_drops_owner() {
   # A project may appear in several secondmates' (non-exclusive) clone lists; the
   # registry never uses the legacy owns: field, and the removed `owner` subcommand
@@ -3024,6 +3072,7 @@ EOF
 
 test_fm_home_parameterization
 test_lock_status_is_per_home
+test_seed_state_permissions
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_unparseable_registry_entry
 test_home_seed_refuses_broken_registry_symlink
