@@ -449,7 +449,9 @@ test_registry_backstop_dedup_and_self_exclusion() {
   assert_contains "$out" "secondmate sm1: updated " "meta+registry secondmate fast-forwarded"
   count=$(printf '%s\n' "$out" | grep -c '^secondmate sm1:' || true)
   [ "$count" -eq 1 ] || fail "secondmate sm1 processed $count times, expected 1 (dedup across meta+registry)"
-  assert_not_contains "$out" "secondmate selfish" "firstmate repo re-processed as its own secondmate"
+  assert_contains "$out" "secondmate selfish: skipped: unsafe home: secondmate home cannot be the firstmate repo" \
+    "firstmate repo self-exclusion was not reported"
+  assert_not_contains "$out" 'secondmate selfish: updated' 'firstmate repo re-processed as its own secondmate'
   # sm1 has live metadata, so it is nudged; reg1 has none, so it is not. Pin the
   # nudge line exactly and confirm reg1 is absent from it (not from the whole
   # output, where 'secondmate reg1: updated' legitimately appears).
@@ -461,6 +463,8 @@ test_registry_backstop_dedup_and_self_exclusion() {
   assert_not_contains "$restart_line" "reg1" "registry-only secondmate without live metadata gets no action"
   assert_not_contains "$nudge_line" "sm1" "a restarted secondmate must not also be nudged"
   assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
+  assert_not_contains "$restart_line" 'selfish' 'self-root record requested a restart'
+  assert_not_contains "$nudge_line" 'selfish' 'self-root record requested a nudge'
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 

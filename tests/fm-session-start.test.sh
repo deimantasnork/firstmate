@@ -29,6 +29,8 @@
 #     network result surfaces exactly once (inline or as a wake, never both), a
 #     read-only session declares the checks it skipped, and the tasks-axi
 #     compatibility verdict is paid for once per session start
+#   - real deferred bootstrap inherits exact dispatch bytes at locked startup;
+#     a later auth-only re-emit leaves a source edit pending until full startup
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2386,6 +2388,96 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
+test_locked_startup_inherits_dispatch_but_reemit_only_probes() {
+  local rec root home fakebin mate head report out status
+  rec=$(new_world startup-inheritance)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  mate="${root%/root}/mate"
+  mkdir -p "$root/bin"
+  printf 'config/\nstate/\ndata/\nprojects/\n.fm-secondmate-home\n' > "$root/.gitignore"
+  printf '# Firstmate fixture\n' > "$root/AGENTS.md"
+  printf '# fixture tooling\n' > "$root/bin/tool.sh"
+  git -C "$root" add .gitignore AGENTS.md bin/tool.sh
+  git -C "$root" commit -qm 'seed home structure'
+  head=$(git -C "$root" rev-parse HEAD)
+  git -C "$root" worktree add -q --detach "$mate" "$head"
+  printf 'sm\n' > "$mate/.fm-secondmate-home"
+  mkdir -p "$mate/config" "$mate/state"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  printf '{\n  "default": {"harness": "codex"}\n}\n\n' > "$home/config/crew-dispatch.json"
+  printf '{"default":{"harness":"claude"}}\n' > "$mate/config/crew-dispatch.json"
+  git -C "$mate" check-ignore -q config/crew-dispatch.json \
+    || fail 'startup inheritance fixture does not ignore dispatch config'
+  [ -z "$(git -C "$mate" status --porcelain)" ] || fail 'startup inheritance fixture is dirty'
+  cmp -s "$home/config/crew-dispatch.json" "$mate/config/crew-dispatch.json" \
+    && fail 'startup inheritance fixture already has the primary dispatch bytes'
+  fm_write_meta "$home/state/sm.meta" 'kind=secondmate' "home=$mate" \
+    'window=firstmate:fm-sm' 'backend=tmux' 'harness=codex'
+  touch "$home/state/.last-watcher-beat"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Stub only the terminal boundary: the same live mate stays in place while
+  # session-start, deferred bootstrap, validation, and inheritance run for real.
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  list-windows*) printf 'fm-sm\n' ;;
+  *display-message*'#{pane_current_command}'*) printf 'codex\n' ;;
+  *display-message*'#{cursor_y}'*) printf '0\n' ;;
+  display-message*) printf '%%1\n' ;;
+  capture-pane*) printf '❯\n' ;;
+  send-keys*) ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  status="$home/state/.startup-network.status"
+
+  out=$(FM_BACKEND=tmux FM_SEND_SETTLE=0 \
+    run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'READ-ONLY' 'startup inheritance fixture did not acquire its lock'
+  wait_for_network_stage "$home" "$root" || fail 'locked inheritance stage did not finish'
+  grep -Fxq 'locked=1' "$status" || fail 'startup did not request a locked stage'
+  grep -Fxq 'phases=probe,sweeps' "$status" || fail 'startup omitted the convergence sweeps'
+  grep -Fxq 'rc=0' "$status" || fail 'locked inheritance stage failed'
+  report=$(network_stage_report "$home" "$root")
+  assert_contains "$report" 'secondmate convergence' 'locked stage did not account for convergence'
+  assert_not_contains "$report" 'SECONDMATE_SYNC:' 'valid tracked-current home was skipped'
+  cmp -s "$home/config/crew-dispatch.json" "$mate/config/crew-dispatch.json" \
+    || fail 'full locked startup did not inherit exact dispatch bytes'
+  cp "$mate/config/crew-dispatch.json" "${root%/root}/dispatch-before-edit"
+
+  # Change only the primary dispatch file between the full start and re-emit.
+  printf '{\n  "default": {"harness": "claude"}\n}\n' > "$home/config/crew-dispatch.json"
+  out=$(FM_BACKEND=tmux FM_SEND_SETTLE=0 \
+    run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit)
+  assert_contains "$out" 'SESSION START (CONTEXT RE-EMIT)' 'context re-emit did not run'
+  wait_for_network_stage "$home" "$root" || fail 're-emit probe did not finish'
+  grep -Fxq 'locked=0' "$status" || fail 're-emit requested mutating authority'
+  grep -Fxq 'phases=probe' "$status" || fail 're-emit requested convergence sweeps'
+  grep -Fxq 'rc=0' "$status" || fail 're-emit auth probe failed'
+  report=$(network_stage_report "$home" "$root")
+  assert_contains "$report" 'GitHub authentication.' 're-emit did not report its auth-only scope'
+  assert_not_contains "$report" 'secondmate convergence' 'auth-only result claimed convergence'
+  cmp -s "${root%/root}/dispatch-before-edit" "$mate/config/crew-dispatch.json" \
+    || fail 're-emit mutated the inherited dispatch bytes'
+  cmp -s "$home/config/crew-dispatch.json" "$mate/config/crew-dispatch.json" \
+    && fail 're-emit fixture did not retain the pending source edit'
+
+  FM_BACKEND=tmux FM_SEND_SETTLE=0 \
+    run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  wait_for_network_stage "$home" "$root" || fail 'second locked inheritance stage did not finish'
+  grep -Fxq 'locked=1' "$status" || fail 'second full startup did not request a locked stage'
+  grep -Fxq 'phases=probe,sweeps' "$status" || fail 'second full startup omitted convergence'
+  grep -Fxq 'rc=0' "$status" || fail 'second locked inheritance stage failed'
+  cmp -s "$home/config/crew-dispatch.json" "$mate/config/crew-dispatch.json" \
+    || fail 'second full startup did not inherit the pending dispatch edit'
+  [ "$(git -C "$mate" rev-parse HEAD)" = "$head" ] || fail 'tracked-current mate changed HEAD'
+  pass 'full locked startup inherits dispatch bytes, re-emit stays auth-only, and another full startup converges a later edit'
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -3070,6 +3162,7 @@ test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
+test_locked_startup_inherits_dispatch_but_reemit_only_probes
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity

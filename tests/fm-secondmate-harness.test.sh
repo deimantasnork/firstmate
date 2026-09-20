@@ -1398,6 +1398,163 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
   pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
 }
 
+# Tracked-file guards must preserve local work without preventing inheritance
+# into a valid home whose dispatch path was already ignored before the sweep.
+test_bootstrap_sweep_inherits_when_tracked_sync_skips() {
+  local mode w head branch status out expected
+  for mode in dirty feature diverged; do
+    w=$(new_world "boot-prop-$mode")
+    add_sm_worktree "$w" sm "$(git -C "$w/main" rev-parse HEAD)"
+    mkdir -p "$w/sm/config"
+    printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+    printf '{"default":{"harness":"claude"}}\n' > "$w/sm/config/crew-dispatch.json"
+    git -C "$w/sm" check-ignore -q config/crew-dispatch.json \
+      || fail "$mode: fixture dispatch path is not ignored"
+    case "$mode" in
+      dirty)
+        printf 'uncommitted work\n' >> "$w/sm/README.md"
+        expected='dirty working tree'
+        ;;
+      feature)
+        git -C "$w/sm" checkout -qb local-feature
+        expected='on local-feature, expected main'
+        ;;
+      diverged)
+        printf 'local work\n' >> "$w/sm/README.md"
+        git -C "$w/sm" commit -qam local
+        expected='diverged from'
+        ;;
+    esac
+    printf 'upstream work\n' > "$w/main/upstream.txt"
+    git -C "$w/main" add upstream.txt
+    git -C "$w/main" commit -qm upstream
+    head=$(git -C "$w/sm" rev-parse HEAD)
+    branch=$(git -C "$w/sm" symbolic-ref -q HEAD || true)
+    status=$(git -C "$w/sm" status --porcelain)
+    cp "$w/sm/README.md" "$w/readme-before"
+
+    out=$(run_bootstrap "$w")
+    assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: $expected" \
+      "$mode: tracked-file guard was not exercised"
+    cmp -s "$w/home/config/crew-dispatch.json" "$w/sm/config/crew-dispatch.json" \
+      || fail "$mode: dispatch bytes did not converge after a tracked-file skip"
+    [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] || fail "$mode: HEAD changed"
+    [ "$(git -C "$w/sm" symbolic-ref -q HEAD || true)" = "$branch" ] || fail "$mode: branch changed"
+    [ "$(git -C "$w/sm" status --porcelain)" = "$status" ] || fail "$mode: worktree status changed"
+    cmp -s "$w/readme-before" "$w/sm/README.md" || fail "$mode: local work changed"
+    assert_absent "$w/sm/upstream.txt" "$mode: skipped tracked files advanced"
+  done
+  pass "bootstrap inheritance survives dirty, feature-branch, and diverged tracked-file skips without altering local work"
+}
+
+test_bootstrap_sweep_discovery_guards() {
+  local mode w head out
+  for mode in empty-home missing-home root-home registry-only no-window registry-fallback; do
+    w=$(new_world "boot-discovery-$mode")
+    head=$(git -C "$w/main" rev-parse HEAD)
+    add_sm_worktree "$w" sm "$head"
+    mkdir -p "$w/sm/config"
+    printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+    printf '{"default":{"harness":"claude"}}\n' > "$w/sm/config/crew-dispatch.json"
+    cp "$w/sm/config/crew-dispatch.json" "$w/dispatch-before"
+    case "$mode" in
+      empty-home) printf 'kind=secondmate\n' > "$w/home/state/sm.meta" ;;
+      missing-home) printf 'kind=secondmate\nhome=%s/absent\n' "$w" > "$w/home/state/sm.meta" ;;
+      root-home) printf 'kind=secondmate\nhome=%s/main\n' "$w" > "$w/home/state/sm.meta" ;;
+      no-window) printf 'kind=secondmate\nhome=%s/sm\n' "$w" > "$w/home/state/sm.meta" ;;
+      registry-only|registry-fallback)
+        printf -- '- sm - config target (home: %s/sm; scope: config; projects: alpha; added 2026-06-30)\n' \
+          "$w" > "$w/home/data/secondmates.md"
+        if [ "$mode" = registry-only ]; then
+          rm "$w/home/state/sm.meta"
+        else
+          printf 'kind=secondmate\n' > "$w/home/state/sm.meta"
+        fi
+        ;;
+    esac
+    out=$(run_bootstrap "$w")
+    case "$mode" in
+      empty-home)
+        assert_contains "$out" 'SECONDMATE_SYNC: secondmate sm: skipped: missing home in metadata and registry' \
+          'empty home was silently skipped'
+        ;;
+      missing-home)
+        assert_contains "$out" 'SECONDMATE_SYNC: secondmate sm: skipped: unsafe home: not a directory' \
+          'missing directory was silently skipped'
+        assert_contains "$out" 'SECONDMATE_SYNC: secondmate sm: skipped: inheritance home validation failed: not a directory' \
+          'second-pass validation failure was silent'
+        assert_absent "$w/absent" 'missing home was created by inheritance'
+        ;;
+      root-home)
+        assert_contains "$out" 'SECONDMATE_SYNC: secondmate sm: skipped: unsafe home: secondmate home cannot be the firstmate repo' \
+          'primary code root was silently skipped'
+        assert_absent "$w/main/config" 'primary code root received inherited config'
+        ;;
+      registry-only)
+        assert_not_contains "$out" 'SECONDMATE_SYNC: secondmate sm:' 'registry-only home entered the live sweep'
+        assert_absent "$w/home/state/sm.meta" 'registry-only home acquired a live record'
+        ;;
+    esac
+    case "$mode" in
+      no-window|registry-fallback)
+        cmp -s "$w/home/config/crew-dispatch.json" "$w/sm/config/crew-dispatch.json" \
+          || fail "$mode: discovered valid home did not inherit config"
+        ;;
+      *)
+        cmp -s "$w/dispatch-before" "$w/sm/config/crew-dispatch.json" \
+          || fail "$mode: undiscovered home received config"
+        ;;
+    esac
+    [ "$(git -C "$w/sm" rev-parse HEAD)" = "$head" ] || fail "$mode: tracked HEAD changed"
+  done
+  pass "bootstrap reports malformed homes and preserves metadata discovery, registry fallback, and window-independent inheritance"
+}
+
+# Change the record at the Git boundary after first-pass admission. The second
+# pass must account for both an invalidated home and a different valid home,
+# without copying to either; no production helper is replaced by this fixture.
+test_bootstrap_sweep_reports_home_changes_between_passes() {
+  local mode w fakebin out
+  for mode in invalid replaced; do
+    w=$(new_world "boot-home-change-$mode")
+    add_sm_worktree "$w" sm "$(git -C "$w/main" rev-parse HEAD)"
+    git -C "$w/main" worktree add -q --detach "$w/replacement" HEAD
+    printf 'sm\n' > "$w/replacement/.fm-secondmate-home"
+    mkdir -p "$w/sm/config" "$w/replacement/config"
+    printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+    printf 'old\n' > "$w/sm/config/crew-dispatch.json"
+    printf 'old\n' > "$w/replacement/config/crew-dispatch.json"
+    fakebin=$(make_fake_toolchain "$w")
+    cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "-C $FM_TEST_CHANGED_HOME status --porcelain" ] && [ ! -e "$FM_TEST_CHANGE_FIRED" ]; then
+  : > "$FM_TEST_CHANGE_FIRED"
+  if [ "$FM_TEST_HOME_CHANGE" = invalid ]; then
+    printf 'wrong-id\n' > "$FM_TEST_CHANGED_HOME/.fm-secondmate-home"
+  else
+    printf 'kind=secondmate\nhome=%s\n' "$FM_TEST_REPLACEMENT_HOME" > "$FM_HOME/state/sm.meta"
+  fi
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+    chmod +x "$fakebin/git"
+    out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_CHANGED_HOME="$w/sm" \
+      FM_TEST_REPLACEMENT_HOME="$w/replacement" FM_TEST_CHANGE_FIRED="$w/changed" \
+      FM_TEST_HOME_CHANGE="$mode" run_bootstrap "$w")
+    [ -e "$w/changed" ] || fail "$mode: fixture never changed the admitted home"
+    if [ "$mode" = invalid ]; then
+      assert_contains "$out" 'inheritance home validation failed: marked for secondmate wrong-id, expected sm' \
+        'second-pass invalidation was silent'
+    else
+      assert_contains "$out" 'inheritance home was not admitted by the local sync sweep; inspect metadata and home changes' \
+        'second-pass membership failure was silent'
+    fi
+    [ "$(cat "$w/sm/config/crew-dispatch.json")" = old ] || fail "$mode: original home was written"
+    [ "$(cat "$w/replacement/config/crew-dispatch.json")" = old ] || fail "$mode: replacement home was written"
+  done
+  pass "bootstrap reports second-pass home validation and admission failures without broadening inheritance"
+}
+
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
   local w out status
   w=$(new_world boot-stale-dispatch no)
@@ -2743,6 +2900,9 @@ test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
+test_bootstrap_sweep_inherits_when_tracked_sync_skips
+test_bootstrap_sweep_discovery_guards
+test_bootstrap_sweep_reports_home_changes_between_passes
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent

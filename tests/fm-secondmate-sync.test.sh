@@ -1254,6 +1254,10 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
     || fail "session start left the remote home off the primary's commit (out: $out)"
   [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
     || fail "session start moved the host's own Firstmate copy"
+  assert_not_contains "$out" 'inheritance home validation failed:' \
+    'remote record was diagnosed by the local inheritance validator'
+  assert_not_contains "$out" 'inheritance home was not admitted by the local sync sweep' \
+    'remote record was diagnosed as missing local admission'
   pass "R8 session start converges a remote home on the primary's default-branch commit"
 }
 
