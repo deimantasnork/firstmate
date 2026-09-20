@@ -19,6 +19,8 @@
 # .fm-secondmate-home marker commits the complete seed last.
 # A newly created home is removed on failure. An existing matching seeded home
 # is converged only through guarded ordinary-file updates and new project clones.
+# A new state/ uses mode 0700 regardless of the caller's umask; existing state
+# permissions and contents are preserved.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -202,7 +204,11 @@ for operational_dir in data state config projects; do
     [ -d "$operational_path" ] && [ ! -L "$operational_path" ] \
       || die "remote home has unsafe operational directory: $operational_dir"
   else
-    mkdir "$operational_path" || die "cannot create remote operational directory: $operational_dir"
+    if [ "$operational_dir" = state ]; then
+      (umask 077; mkdir "$operational_path") || die "cannot create remote operational directory: $operational_dir"
+    else
+      mkdir "$operational_path" || die "cannot create remote operational directory: $operational_dir"
+    fi
   fi
 done
 if [ -e "$FM_HOME/data/backlog.md" ] || [ -L "$FM_HOME/data/backlog.md" ]; then
