@@ -6,6 +6,8 @@
 # and a seeded secondmate home are trusted so the agent reaches its brief or
 # charter with no human, and every out-of-scope path is REFUSED rather than
 # warned about or quietly skipped.
+# Successful registration also completes onboarding and defaults a missing theme
+# while preserving an explicit theme and all external-import consent boundaries.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -188,10 +190,40 @@ test_fresh_worktree_is_trusted() {
   expect_code 0 $? "a fresh linked worktree must be trusted: $out"
   assert_contains "$out" "trusted:" "registration did not report what it trusted"
   assert_trusted "$CONFIG/.claude.json" "$WT" "the worktree was not recorded as trusted"
+  assert_store_value "$CONFIG/.claude.json" true "fresh config did not complete onboarding" hasCompletedOnboarding
+  assert_store_value "$CONFIG/.claude.json" '"auto"' "fresh config did not default its theme" theme
   # The staged write is renamed into place, so no temporary store may survive it.
   [ -z "$(find "$CONFIG" -maxdepth 1 -name '.claude.json.fm-trust.*' -print -quit)" ] \
     || fail "a temporary store file was left behind in the config directory"
   pass "fm-claude-trust.sh: a fresh task worktree is trusted"
+}
+
+test_onboarding_preserves_an_explicit_theme() {
+  local rec store theme
+  rec=$(make_case onboarding-theme)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  for theme in dark light auto; do
+    printf '{"hasCompletedOnboarding":false,"theme":"%s","numStartups":7}\n' "$theme" > "$store"
+    run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null || fail "registration failed with explicit theme $theme"
+    assert_store_value "$store" true "incomplete onboarding was not completed" hasCompletedOnboarding
+    assert_store_value "$store" "\"$theme\"" "explicit theme was overwritten" theme
+    assert_store_value "$store" 7 "onboarding changed an unrelated preference" numStartups
+  done
+  pass "fm-claude-trust.sh: completes onboarding without overwriting an explicit theme"
+}
+
+test_completed_onboarding_still_defaults_a_missing_theme() {
+  local rec store
+  rec=$(make_case onboarding-no-theme)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  printf '{"hasCompletedOnboarding":true,"numStartups":7}\n' > "$store"
+  run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null || fail "registration failed with completed onboarding and no theme"
+  assert_store_value "$store" true "completed onboarding was changed" hasCompletedOnboarding
+  assert_store_value "$store" '"auto"' "existing config did not default a missing theme" theme
+  assert_store_value "$store" 7 "theme default changed an unrelated preference" numStartups
+  pass "fm-claude-trust.sh: defaults a missing theme even when onboarding is already complete"
 }
 
 # The trust dialog is read only from the PROJECT-root entry, never the
@@ -272,7 +304,7 @@ test_project_root_entry_declined_external_imports_is_not_overridden() {
   read_case "$rec"
   store="$CONFIG/.claude.json"
   cat > "$store" <<JSON
-{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true,"allowedTools":["Read"]}}}
+{"hasCompletedOnboarding":false,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true,"allowedTools":["Read"]}}}
 JSON
   before=$(cat "$store")
   out=$(run_trust "$CONFIG" "$WT" "$PROJ")
@@ -310,14 +342,16 @@ JSON
 }
 
 test_registration_is_idempotent() {
-  local rec out count
+  local rec out count before
   rec=$(make_case idempotent)
   read_case "$rec"
   run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null
+  before=$(cat "$CONFIG/.claude.json")
   out=$(run_trust "$CONFIG" "$WT" "$PROJ")
   expect_code 0 $? "a repeat registration must succeed: $out"
   count=$(trusted_paths "$CONFIG/.claude.json" | grep -Fxc "$WT")
   [ "$count" = 1 ] || fail "a repeat registration duplicated the entry ($count)"
+  [ "$(cat "$CONFIG/.claude.json")" = "$before" ] || fail "a repeat registration changed the config"
   pass "fm-claude-trust.sh: repeat registration is idempotent"
 }
 
@@ -780,6 +814,8 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   expect_code 0 $? "the claude spawn must succeed: $out"
   assert_trusted "$config/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"
+  assert_store_value "$config/.claude.json" true "worker spawn did not complete onboarding" hasCompletedOnboarding
+  assert_store_value "$config/.claude.json" '"auto"' "worker spawn did not default its theme" theme
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
     "the launch command was not the claude worker launch"
@@ -940,6 +976,8 @@ test_secondmate_standalone_clone_home_is_trusted() {
   expect_code 0 $? "a claude secondmate spawn into a standalone-clone home must succeed: $out"
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its standalone-clone home"
+  assert_store_value "$case_dir/claude-config/.claude.json" true "clone-home spawn did not complete onboarding" hasCompletedOnboarding
+  assert_store_value "$case_dir/claude-config/.claude.json" '"auto"' "clone-home spawn did not default its theme" theme
   assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
     "the launch command was not the claude secondmate launch"
@@ -971,6 +1009,8 @@ test_secondmate_leased_worktree_home_is_trusted() {
   expect_code 0 $? "a claude secondmate spawn into a leased worktree home must succeed: $out"
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its leased worktree home"
+  assert_store_value "$case_dir/claude-config/.claude.json" true "leased-home spawn did not complete onboarding" hasCompletedOnboarding
+  assert_store_value "$case_dir/claude-config/.claude.json" '"auto"' "leased-home spawn did not default its theme" theme
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a leased worktree home"
 }
 
@@ -1089,6 +1129,8 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
 }
 
 test_fresh_worktree_is_trusted
+test_onboarding_preserves_an_explicit_theme
+test_completed_onboarding_still_defaults_a_missing_theme
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
