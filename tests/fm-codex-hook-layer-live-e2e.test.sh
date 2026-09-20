@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live guard for the codex crewmate launch's hook posture.
+# Live guard for the codex crewmate launch's hook posture and catalog efforts.
 #
 # The verdict here comes from the installed codex, not from a stub: a stub can
 # only confirm the assumption already written into it, and what this guard
@@ -23,7 +23,7 @@ set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex
+fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex jq
 
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
@@ -45,7 +45,7 @@ capture_codex_launch() {
   fm_test_spawn_brief "$home" "$id"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   : > "$launchlog"
-  FM_FAKE_LAUNCH_LOG="$launchlog" \
+  FM_TEST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" FM_FAKE_LAUNCH_LOG="$launchlog" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" "$@" >/dev/null 2>&1 ||
     fail "codex $CODEX_VERSION: fm-spawn could not build a crewmate launch"
   cat "$launchlog"
@@ -91,7 +91,26 @@ test_installed_codex_still_reports_the_hook_feature() {
   printf 'ok - codex %s still publishes the hook feature flag firstmate disables\n' "$CODEX_VERSION"
 }
 
+# Compare launch output with the real vendor catalog, then let the installed
+# CLI parse each emitted effort. This spends no tokens and submits no prompt.
+test_installed_codex_catalog_efforts() {
+  local model effort launch flags result
+  model=$(jq -er '[.models[] | select(any(.supported_reasoning_levels[]; .effort == "max"))
+    | select(any(.supported_reasoning_levels[]; .effort == "xhigh")) | .slug] | first // empty' \
+    "${CODEX_HOME:-$HOME/.codex}/models_cache.json" 2>/dev/null) ||
+    fail "codex $CODEX_VERSION: readable catalog with a max/xhigh model required for the live effort guard"
+  for effort in max xhigh; do
+    launch=$(capture_codex_launch "catalog-$effort" --mode local-only --yolo off --model "$model" --effort "$effort")
+    assert_contains "$launch" "model_reasoning_effort=\"$effort\"" "codex $CODEX_VERSION: advertised $effort missing from launch"
+    flags=$(codex_global_flags "$launch")
+    result=$(eval "codex $flags features list" 2>&1) ||
+      fail "codex $CODEX_VERSION rejected catalog-backed $model $effort launch flags: $result"
+    printf 'ok - codex %s accepts catalog-backed %s %s launch flags\n' "$CODEX_VERSION" "$model" "$effort"
+  done
+}
+
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_disables_hooks_for_the_captured_crewmate_launch
+test_installed_codex_catalog_efforts
 
 echo "# all fm-codex-hook-layer-live-e2e tests passed"

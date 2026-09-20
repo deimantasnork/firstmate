@@ -23,6 +23,9 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
+TEST_CODEX_HOME="$TMP_ROOT/codex"
+mkdir -p "$TEST_CODEX_HOME"
+cp "$ROOT/tests/fixtures/codex/models_cache.json" "$TEST_CODEX_HOME/models_cache.json"
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
@@ -163,7 +166,7 @@ reset_log() {
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(CODEX_HOME="$TEST_CODEX_HOME" PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -173,7 +176,7 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(CODEX_HOME="$TEST_CODEX_HOME" PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -182,6 +185,65 @@ run_without_curl() {
 
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
+
+write_catalog_response() {
+  jq -n --arg choice "$1" '{model:"jev-1.13.0",answers:{rule:{type:"choice",choice:$choice,confidence:0.9,
+    probabilities:(if $choice == "rule_1" then {rule_1:0.9,default:0.1} else {rule_1:0.1,default:0.9} end)}}}' > "$RESPONSE"
+}
+
+# Catalog-backed effort validation uses a private cache, never the host's.
+for model in gpt-5.6-luna gpt-6-astra future-catalog-model; do
+  for location in use default; do
+    for effort in max xhigh; do
+      reset_log
+      jq -n --arg model "$model" --arg effort "$effort" --arg location "$location" '
+        {harness:"codex", model:$model, effort:$effort} as $p |
+        if $location == "use" then {rules:[{when:"coding",use:[$p]}]}
+        else {rules:[{when:"coding",use:{harness:"codex"}}],default:$p} end
+      ' > "$RULES"
+      if [ "$location" = use ]; then write_catalog_response rule_1
+      else write_catalog_response default; fi
+      TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+      expect_code 0 "$code" "$model $effort accepted in $location: $err"
+      assert_contains "$out" "  profile: --harness 'codex' --model '$model' --effort '$effort'" "resolved effort preserved"
+    done
+  done
+done
+pass "resolver accepts catalog max and existing xhigh in rules and defaults"
+
+# Removing capability, an absent cache, and malformed data must never allow max.
+for catalog in missing '{' '{"models":{}}' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"xhigh"}]}]}' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":"max"}]}' '{"models":[{"slug":"gpt-6-astra-extra","supported_reasoning_levels":[{"effort":"max"}]}]}'; do
+  if [ "$catalog" = missing ]; then rm -f "$TEST_CODEX_HOME/models_cache.json"
+  else printf '%s\n' "$catalog" > "$TEST_CODEX_HOME/models_cache.json"; fi
+  printf '%s\n' '{"rules":[{"when":"coding","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}' > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "unproven max is rejected: $catalog"
+  assert_contains "$err" 'effort must be supported by its harness and model' "effort error names failure"
+  assert_absent "$LOG/argv" "unproven max is rejected before network"
+  sed 's/"max"/"xhigh"/' "$RULES" > "$TMP_ROOT/xhigh.json"
+  cp "$TMP_ROOT/xhigh.json" "$RULES"
+  write_catalog_response rule_1
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "xhigh needs no catalog: $err"
+  assert_contains "$out" "--effort 'xhigh'" "xhigh survives unavailable max capability"
+done
+cp "$ROOT/tests/fixtures/codex/models_cache.json" "$TEST_CODEX_HOME/models_cache.json"
+for profile in '{"harness":"codex","model":"gpt-6-astra","effort":"ultra"}' '{"harness":"codex","model":"gpt-5","effort":"max"}' '{"harness":"codex","effort":"max"}'; do
+  for location in use default; do
+    jq -n --argjson p "$profile" --arg location "$location" '
+      if $location == "use" then {rules:[{when:"coding",use:$p}]}
+      else {rules:[{when:"coding",use:{harness:"codex"}}],default:[$p]} end
+    ' > "$RULES"
+    reset_log
+    TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+    expect_code 2 "$code" "unsupported profile refused in $location"
+    assert_contains "$err" 'effort must be supported by its harness and model' "unsupported effort named"
+    assert_absent "$LOG/argv" "unsupported effort never reaches network"
+  done
+done
+pass "resolver refuses unproven max and Codex ultra even when advertised"
+cp "$BASE_RULES" "$RULES"
 
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log

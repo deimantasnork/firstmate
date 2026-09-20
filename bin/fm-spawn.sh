@@ -88,6 +88,7 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   Codex max capability discovery is owned by bin/fm-codex-models-lib.sh.
 #   --account <name> pins the named credential account from local config/
 #   crew-accounts.json, and without it a codex or claude spawn selects one
 #   automatically by fill-first order (bin/fm-account-choose.sh owns the
@@ -613,6 +614,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-models-lib.sh
+. "$SCRIPT_DIR/fm-codex-models-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -2817,13 +2820,11 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # fm-codex-models-lib.sh owns catalog-backed max capability discovery.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
+      fm_codex_max_models "${SM_CODEX_STORE:-$ACCOUNT_STORE}" | jq -e --arg model "$model" 'index($model) != null' >/dev/null 2>&1 || return 0
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac
