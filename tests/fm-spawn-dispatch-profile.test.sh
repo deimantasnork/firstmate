@@ -1899,6 +1899,38 @@ test_codex_selected_account_without_max_omits_it() {
   pass "codex max uses the selected account catalog instead of the ambient catalog"
 }
 
+test_codex_spawn_skips_an_account_whose_catalog_lacks_the_model() {
+  local rec id out status launch meta codex_a codex_b claude_a claude_b
+  id=account-codex-model-z9m
+  rec=$(make_spawn_case account-codex-model codex "$id")
+  read_case_record "$rec"
+  codex_a="$CASE_DIR/store-codex-a"
+  codex_b="$CASE_DIR/store-codex-b"
+  claude_a="$CASE_DIR/store-claude-a"
+  claude_b="$CASE_DIR/store-claude-b"
+  # The first account has full headroom, but its own catalog cannot serve Astra.
+  write_account_store "$codex_a" "$(account_store_json codex 100 through_reset)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
+  write_account_store "$claude_a" "$(account_store_json claude 80 through_reset)"
+  write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
+  write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna"}]}' > "$codex_a/models_cache.json"
+  cp "$ROOT/tests/fixtures/codex/models_cache.json" "$codex_b/models_cache.json"
+
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-astra)
+  status=$?
+  expect_code 0 "$status" "a codex spawn should select the account that can serve its model"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_b'" "the account able to serve the model was not forwarded"
+  assert_not_contains "$launch" "$codex_a" "the account whose catalog lacks the model was forwarded"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account=secondary" "$meta" "the model-capable account was not recorded on the task record"
+  assert_contains "$out" "account: vendor=codex account=secondary" "the spawn did not report its account evidence"
+  assert_contains "$out" "model=gpt-6-astra model_advertised=yes" "the spawn did not report the catalog evidence"
+  pass "a codex spawn names its model so an account whose catalog lacks it is skipped"
+}
+
 test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
   local rec id out status launch ambient meta
   id=account-claude-ambient-z9b
@@ -2262,6 +2294,7 @@ test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_codex_spawn_forwards_the_selected_account_store
 test_codex_selected_account_without_max_omits_it
+test_codex_spawn_skips_an_account_whose_catalog_lacks_the_model
 test_claude_spawn_selects_per_dispatch_over_an_ambient_store
 test_explicit_account_pin_is_forwarded_and_recorded
 test_harnesses_without_a_configured_vendor_are_untouched

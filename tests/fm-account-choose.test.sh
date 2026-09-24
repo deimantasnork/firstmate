@@ -682,6 +682,241 @@ JSON
   pass "a ~-prefixed store path resolves against the launching user's home"
 }
 
+# --- model catalog axis (--model) --------------------------------------------
+
+# write_catalog <store> <slug...> - a store's own installed Codex catalog; a
+# hidden-visibility entry is still an advertised model.
+write_catalog() {
+  local store=$1 slug models=
+  shift
+  for slug in "$@"; do
+    models="${models:+$models,}{\"slug\":\"$slug\",\"visibility\":\"list\"}"
+  done
+  mkdir -p "$store"
+  printf '{"models":[%s,{"slug":"hidden-internal","visibility":"hide"}]}\n' "$models" > "$store/models_cache.json"
+}
+
+test_model_missing_from_a_catalog_skips_that_store() {
+  local out status log
+  setup_case model-skip
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_A" gpt-6-luna gpt-5.6-terra
+  write_catalog "$STORE_B" gpt-6-sol gpt-6-luna
+  write_default_config
+
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "the next store advertising the model should be selected"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the store lacking the model was not skipped: $out"
+  [ "$(field "$out" store)" = "$STORE_B" ] || fail "the wrong store was selected: $out"
+  [ "$(field "$out" model)" = gpt-6-sol ] || fail "the named model was not reported: $out"
+  [ "$(field "$out" model_advertised)" = yes ] || fail "the selected store's catalog evidence was not reported: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise gpt-6-sol" \
+    "the catalog skip was not recorded on the candidate line: $out"
+  assert_contains "$out" "candidate=secondary store=$STORE_B measured=yes percent=87 runway=through_reset -> selected" \
+    "the selected candidate line lost its quota evidence: $out"
+  log=$(cat "$QUOTA_LOG")
+  assert_not_contains "$log" "CODEX_HOME=$STORE_A " "a store that cannot serve the model still had its quota read: $log"
+  pass "a store whose own catalog lacks the named model is skipped for the next eligible store"
+}
+
+test_model_advertised_by_the_first_catalog_is_selected() {
+  local out status
+  setup_case model-advertised
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_A" gpt-6-sol gpt-6-astra
+  write_catalog "$STORE_B" gpt-6-sol
+
+  write_default_config
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "a store advertising the model should be selected"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "fill-first did not keep the advertising first store: $out"
+  [ "$(field "$out" model_advertised)" = yes ] || fail "the catalog evidence was not reported: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=yes percent=100 runway=through_reset -> selected"$'\n' \
+    "an advertising store carried a disclosure: $out"
+
+  # A hidden-visibility catalog entry is still a model the store can serve.
+  out=$(choose --vendor codex --model hidden-internal)
+  status=$?
+  expect_code 0 "$status" "a hidden catalog entry should still select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "a hidden catalog entry was treated as unsupported: $out"
+  pass "a store whose own catalog advertises the named model is selected by fill-first"
+}
+
+test_unmeasurable_model_catalog_is_disclosed_uncertainty() {
+  local out status
+  setup_case model-unmeasurable
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_B" gpt-6-sol
+  write_default_config
+
+  # Absent catalog.
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "an absent catalog must not block the store"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "an absent catalog blocked fill-first: $out"
+  [ "$(field "$out" measured)" = yes ] || fail "catalog uncertainty changed the quota measurement: $out"
+  [ "$(field "$out" percent)" = 100 ] || fail "catalog uncertainty hid the measured percent: $out"
+  [ "$(field "$out" model_advertised)" = unknown ] || fail "an absent catalog was not disclosed as unknown: $out"
+  assert_contains "$out" "-> selected:model catalog unmeasurable (the store has no readable models_cache.json)" \
+    "the absent catalog was not disclosed on the candidate line: $out"
+
+  # Malformed catalog.
+  printf '%s\n' 'not json' > "$STORE_A/models_cache.json"
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "a malformed catalog must not block the store"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "a malformed catalog blocked fill-first: $out"
+  [ "$(field "$out" model_advertised)" = unknown ] || fail "a malformed catalog was not disclosed: $out"
+
+  # A valid catalog listing no models carries no evidence about this one.
+  printf '%s\n' '{"models":[]}' > "$STORE_A/models_cache.json"
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "an empty catalog must not block the store"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "an empty catalog blocked fill-first: $out"
+  assert_contains "$out" "-> selected:model catalog unmeasurable (the store catalog lists no models)" \
+    "the empty catalog was not disclosed: $out"
+
+  # Both unmeasurable: each disclosure is kept.
+  rm -f "$STORE_A/models_cache.json"
+  write_store "$STORE_A" "$(unknown_json codex)"
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "unmeasurable quota and catalog must still select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "double uncertainty blocked fill-first: $out"
+  [ "$(field "$out" measured)" = no ] || fail "the unmeasurable quota was not disclosed: $out"
+  [ "$(field "$out" model_advertised)" = unknown ] || fail "the unmeasurable catalog was not disclosed: $out"
+  assert_contains "$out" "-> selected:headroom unmeasurable (quota-axi reports no measurable window); model catalog unmeasurable (the store has no readable models_cache.json)" \
+    "both disclosures were not reported: $out"
+  pass "an absent, malformed, or empty catalog stays selectable as disclosed uncertainty"
+}
+
+test_named_model_without_catalog_evidence_keeps_todays_selection() {
+  local plain named key log_plain log_named
+  setup_case model-no-evidence
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_default_config
+
+  plain=$(choose --vendor codex) || fail "selection without a model should succeed: $plain"
+  log_plain=$(cat "$QUOTA_LOG")
+  : > "$QUOTA_LOG"
+  named=$(choose --vendor codex --model gpt-6-sol) || fail "selection with a model should succeed: $named"
+  log_named=$(cat "$QUOTA_LOG")
+  for key in selected vendor pin store_env store measured percent runway identity; do
+    [ "$(field "$plain" "$key")" = "$(field "$named" "$key")" ] ||
+      fail "a named model without catalog evidence changed $key: plain=$plain named=$named"
+  done
+  [ "$log_plain" = "$log_named" ] || fail "a named model changed which stores were probed: $log_plain vs $log_named"
+  assert_contains "$named" "skipped:runway exhausted_now at all_models" "the quota disqualifier no longer applied: $named"
+  assert_not_contains "$plain" "model=" "selection without --model reported a model: $plain"
+  assert_not_contains "$plain" "model catalog" "selection without --model read a catalog: $plain"
+  pass "a named model with no catalog evidence leaves today's selection untouched"
+}
+
+test_no_model_ignores_catalogs() {
+  local out status
+  setup_case model-unnamed
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_A" gpt-6-luna
+  write_default_config
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "selection without a model should succeed"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "a catalog influenced a selection that named no model: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=yes percent=100 runway=through_reset -> selected"$'\n' \
+    "selection without a model changed its candidate line: $out"
+  pass "without --model no catalog is read and selection is unchanged"
+}
+
+test_every_store_lacking_the_model_refuses() {
+  local out status log
+  setup_case model-none
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_A" gpt-6-luna
+  write_catalog "$STORE_B" gpt-5.6-terra
+  write_default_config
+
+  out=$(choose --vendor codex --model gpt-6-sol)
+  status=$?
+  expect_code 3 "$status" "no store able to serve the model must refuse"$'\n'"$out"
+  assert_not_contains "$out" "selected=" "a store lacking the model was selected: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise gpt-6-sol" \
+    "the first refusal evidence was not reported: $out"
+  assert_contains "$out" "candidate=secondary store=$STORE_B measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise gpt-6-sol" \
+    "the second refusal evidence was not reported: $out"
+  assert_contains "$out" "error: no codex account is usable: every configured account was disqualified on measured evidence" \
+    "the existing refusal diagnostic changed: $out"
+  log=$(cat "$QUOTA_LOG")
+  [ -z "$log" ] || fail "stores that cannot serve the model still had their quota read: $log"
+  pass "every store lacking the named model keeps the existing refusal"
+}
+
+test_pin_bypasses_the_model_catalog() {
+  local out status
+  setup_case model-pin
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_catalog "$STORE_A" gpt-6-sol
+  write_catalog "$STORE_B" gpt-6-luna
+  write_default_config
+
+  out=$(choose --vendor codex --pin secondary --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "a pin must not be refused on catalog evidence"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the pin did not select its account: $out"
+  [ "$(field "$out" pin)" = yes ] || fail "the pin was not disclosed: $out"
+  [ "$(field "$out" model_advertised)" = no ] || fail "the pin's catalog evidence was not reported: $out"
+  assert_contains "$out" "-> selected:pinned although its model catalog does not advertise gpt-6-sol" \
+    "the pinned store's catalog evidence was not disclosed: $out"
+
+  # An optional pin that falls through selects with the catalog axis applied.
+  mkdir -p "$FIXTURE/store-claude-only"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "secondary", "codex_home": "$STORE_B" },
+    { "name": "primary", "codex_home": "$STORE_A" },
+    { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" }
+  ]
+}
+JSON
+  out=$(choose --vendor codex --pin claude-only --pin-optional --model gpt-6-sol)
+  status=$?
+  expect_code 0 "$status" "a fallen-through optional pin should select automatically"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the fall-through ignored the catalog axis: $out"
+  [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was reported as the pin: $out"
+  assert_contains "$out" "skipped:its model catalog does not advertise gpt-6-sol" "the fall-through did not skip the lacking store: $out"
+  pass "a pin still selects a store whose catalog lacks the model and discloses it"
+}
+
+test_model_usage_errors() {
+  local out status
+  setup_case model-usage
+  out=$(choose --vendor claude --model gpt-6-sol)
+  status=$?
+  expect_code 2 "$status" "--model with a non-codex vendor is a usage error"$'\n'"$out"
+  assert_contains "$out" "--model applies only to --vendor codex" "the vendor scope was not explained: $out"
+  out=$(choose --validate --model gpt-6-sol)
+  status=$?
+  expect_code 2 "$status" "--validate takes no --model"$'\n'"$out"
+  out=$(choose --vendor codex --model '')
+  status=$?
+  expect_code 2 "$status" "an empty --model is a usage error"$'\n'"$out"
+  out=$(choose --vendor codex --model 'gpt 6')
+  status=$?
+  expect_code 2 "$status" "a --model with whitespace is a usage error"$'\n'"$out"
+  pass "--model usage errors exit 2"
+}
+
 test_usage_errors() {
   local out status
   setup_case usage
@@ -727,6 +962,14 @@ test_missing_store_directory_is_a_configuration_error
 test_malformed_config_is_refused
 test_validate_checks_the_whole_file
 test_home_relative_store_paths_expand
+test_model_missing_from_a_catalog_skips_that_store
+test_model_advertised_by_the_first_catalog_is_selected
+test_unmeasurable_model_catalog_is_disclosed_uncertainty
+test_named_model_without_catalog_evidence_keeps_todays_selection
+test_no_model_ignores_catalogs
+test_every_store_lacking_the_model_refuses
+test_pin_bypasses_the_model_catalog
+test_model_usage_errors
 test_usage_errors
 
 printf '%s\n' '# all fm-account-choose tests passed'

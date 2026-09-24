@@ -93,6 +93,8 @@
 #   crew-accounts.json, and without it a codex or claude spawn selects one
 #   automatically by fill-first order (bin/fm-account-choose.sh owns the
 #   selection rules; docs/configuration.md "Crew accounts" owns the schema).
+#   A codex spawn names its concrete --model to that selection, so a store
+#   whose own catalog provably lacks the model is passed over.
 #   The chosen store is forwarded as CODEX_HOME or CLAUDE_CONFIG_DIR so the
 #   choice is per-dispatch rather than ambient, and it is recorded on the task
 #   record as account= (plus account_pin=yes when it was named explicitly, and
@@ -2514,18 +2516,20 @@ account_pin_resolves_here() {  # <vendor> <name>
   [ -d "$resolved" ]
 }
 
-# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1>
+# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1> [<codex-model>]
 #   Sets ACCOUNT_RESOLVED_NAME, ACCOUNT_RESOLVED_STORE, ACCOUNT_RESOLVED_PIN,
-#   ACCOUNT_RESOLVED_EVIDENCE. Returns 1 (selecting nothing) when this vendor
-#   has no account to select, and refuses the whole spawn on a configuration
-#   error or when no configured account can be measured as usable. A pin is
+#   ACCOUNT_RESOLVED_EVIDENCE. A codex model is forwarded to the chooser as
+#   --model, so each store's catalog evidence joins the selection. Returns 1
+#   (selecting nothing) when this vendor has no account to select, and refuses
+#   the whole spawn on a configuration error or when no configured account can
+#   be measured as usable. A pin is
 #   optional only for a caller resolving several vendors with one account name:
 #   where that account declares no store for this vendor, selection continues
 #   instead of refusing. Everywhere else a pin that cannot apply is refused
 #   rather than silently dropped.
 account_resolve() {
-  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 pin_optional=${6:-0}
-  local out rc=0 args name store pin_used measured pct runway identity
+  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 pin_optional=${6:-0} model=${7:-}
+  local out rc=0 args name store pin_used measured pct runway identity advertised
   ACCOUNT_RESOLVED_NAME=
   ACCOUNT_RESOLVED_STORE=
   ACCOUNT_RESOLVED_PIN=no
@@ -2547,6 +2551,7 @@ account_resolve() {
     args+=(--pin "$pin")
     [ "$pin_optional" != 1 ] || args+=(--pin-optional)
   fi
+  [ -z "$model" ] || args+=(--model "$model")
   out=$("$ACCOUNT_CHOOSER" "${args[@]}" 2>&1) || rc=$?
   if [ "$rc" -eq 3 ]; then
     printf '%s\n' "$out" >&2
@@ -2564,6 +2569,7 @@ account_resolve() {
   pct=$(account_chooser_field "$out" percent)
   runway=$(account_chooser_field "$out" runway)
   identity=$(account_chooser_field "$out" identity)
+  advertised=$(account_chooser_field "$out" model_advertised)
   if [ -z "$name" ] || [ "$name" = none ]; then
     return 1
   fi
@@ -2571,6 +2577,7 @@ account_resolve() {
   ACCOUNT_RESOLVED_STORE=$store
   ACCOUNT_RESOLVED_PIN=$pin_used
   ACCOUNT_RESOLVED_EVIDENCE="account: vendor=$vendor account=$name store=$store measured=$measured percent=$pct runway=$runway identity=$identity"
+  [ -z "$model" ] || ACCOUNT_RESOLVED_EVIDENCE="$ACCOUNT_RESOLVED_EVIDENCE model=$model model_advertised=${advertised:-unknown}"
   return 0
 }
 
@@ -2631,7 +2638,11 @@ else
           ACCOUNT_PIN_NAME=
         fi
       fi
-      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" - - "$ACCOUNT_ALLOW_AUTO" 0; then
+      ACCOUNT_MODEL=
+      if [ "$ACCOUNT_VENDOR" = codex ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+        ACCOUNT_MODEL=$MODEL
+      fi
+      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" - - "$ACCOUNT_ALLOW_AUTO" 0 "$ACCOUNT_MODEL"; then
         ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME
         ACCOUNT_STORE=$ACCOUNT_RESOLVED_STORE
         ACCOUNT_PIN=$ACCOUNT_RESOLVED_PIN
