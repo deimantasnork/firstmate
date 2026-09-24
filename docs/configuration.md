@@ -1149,12 +1149,16 @@ Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single
 - When every account for that vendor is closed or measurably disqualified the spawn refuses and prints the candidate evidence; an explicit pin still selects one.
 
 `fm-spawn.sh` forwards the chosen store onto that launch as `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the choice is per dispatch rather than ambient, and records it on the task record as `account=`.
-A pre-set store is forwarded only when this home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
+In a primary home a pre-set store is forwarded only when that home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
+A secondmate home never forwards an ambient store, as described below.
 
 `--account <name>` pins one account for that task.
 A pin is an explicit decision, so it bypasses the fill-first order, the reserve including a closed one, the exhaustion check, and the model catalog check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
-A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch and recovery respawn, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
+A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir` on its secondmate record in the parent home, reuses them on every relaunch and recovery respawn, and ships them into its own environment, so its identity cannot drift between stores mid-flight.
+A crewmate that home spawns runs on the same recorded store, read from that record through the home's local parent binding rather than from the environment, because an agent's shell can re-source a profile that points the ambient store at another account; the home does not auto-select while its record names a store, and a recorded store that is no longer an existing directory refuses the spawn.
+Where the home has no reachable record naming a store for that vendor, such as on a remote route, it selects from its own `config/crew-accounts.json` like a primary home, and with neither it launches that crewmate on the CLI's own default store with a one-line notice instead of forwarding the ambient value.
+Only an explicit `--account` moves one worker off the home's store.
 An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with an existing store directory for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, and the other vendor still resolves automatically; an `--account` that names no store for any vendor is refused.
 A primary cannot pass `--account` through a remote-secondmate spawn because its account file names paths on the primary host; the remote home resolves its stores from its own host-local configuration.

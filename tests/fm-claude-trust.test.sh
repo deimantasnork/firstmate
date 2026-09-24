@@ -864,10 +864,12 @@ test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone() {
   pass "fm-spawn.sh: a claude spawn pre-trusts a pooled worktree linked to a sibling clone"
 }
 
-# A secondmate's inherited account store can contain only its project clone's
+# A secondmate's recorded account store can contain only its project clone's
 # entry, with no slot entry at all. Exercise both pool ownership shapes through
 # spawn, including the secondmate account-selection branch, and pin the exact
-# slot key in the same store the worker launch carries.
+# slot key in the same store the worker launch carries. The store reaches the
+# worker from the home's own secondmate record in its parent home, never from
+# the spawning process's environment, which is left empty here.
 test_secondmate_worker_pretrusts_the_slot_in_its_inherited_store() {
   local shape task_home proj id launch_log out fakebin
   for shape in same sibling; do
@@ -879,13 +881,18 @@ test_secondmate_worker_pretrusts_the_slot_in_its_inherited_store() {
     [ "$shape" != same ] || proj=$POOL_PEER
     fm_test_spawn_home "$task_home" claude
     printf '%s\n' finder-mate > "$task_home/.fm-secondmate-home"
+    mkdir -p "$POOL_CASE/parent/state"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$POOL_CASE/parent" \
+      > "$task_home/.fm-secondmate-parent"
+    printf 'kind=secondmate\nhome=%s\naccount_claude=home-account\nclaude_config_dir=%s\n' \
+      "$task_home" "$POOL_CONFIG" > "$POOL_CASE/parent/state/finder-mate.meta"
     fm_test_spawn_brief "$task_home" "$id"
     fakebin=$(make_spawn_fakebin "$POOL_CASE/fake" claude)
     cat > "$POOL_STORE" <<JSON
 {"projects":{"$proj":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false}}}
 JSON
     assert_not_trusted "$POOL_STORE" "$POOL_WT" "the fixture already trusted the pool slot"
-    out=$(FM_TEST_CLAUDE_CONFIG_DIR="$POOL_CONFIG" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    out=$(FM_TEST_CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$launch_log" \
       fm_test_run_spawn "$task_home" "$POOL_WT" "$fakebin" "$id" "$proj" claude \
       --mode no-mistakes --yolo off)
     expect_code 0 $? "a secondmate's $shape-clone pool spawn must succeed: $out"
@@ -903,7 +910,7 @@ JSON
     assert_grep "worktree=$POOL_WT" "$task_home/state/$id.meta" \
       "the registered slot differed from the worker's recorded worktree"
   done
-  pass "fm-spawn.sh: secondmate workers trust the exact same-clone and sibling-clone pool slot in their inherited store"
+  pass "fm-spawn.sh: secondmate workers trust the exact same-clone and sibling-clone pool slot in their recorded store"
 }
 
 # A multiplexer pane can retain a store that the spawning process does not
