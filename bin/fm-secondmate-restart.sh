@@ -35,6 +35,12 @@
 #      deliberately leaves that unanswered expectation open: it is a genuine
 #      open loop owned by the ordinary pending-reply recovery ladder, not state
 #      this restart pass may close.
+#      The answer can land while the mate's pane is still finishing the turn
+#      that wrote it, so the relaunch's exit step in bin/fm-control.sh re-reads
+#      an unproven composer for a bounded settle window before it types
+#      anything, and refuses only if it never proves empty. That one owner
+#      serves both placements, because a remote mate's composer can only be
+#      read on its own host.
 #
 # A mate whose persist answer did not arrive or whose runtime cannot prove a
 # restart gets the ordinary re-read nudge and is reported as a nudge, never as a
@@ -72,7 +78,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,71{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in

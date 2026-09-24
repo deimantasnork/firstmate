@@ -79,6 +79,7 @@ case "${1:-}" in
         ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
       esac
       printf '%s\n' "$payload" >> "$D/literal"
+      printf 'literal %s\n' "$payload" >> "$D/events"
       case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
@@ -120,6 +121,22 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    # The composer read is the one styled (-e) capture. While unsettled-reads
+    # holds a positive count (or `forever`), the modelled agent is still
+    # finishing a turn: the input area shows no composer shape the classifier
+    # can prove, and each read spends one count.
+    case " $* " in
+      *' -e '*)
+        unsettled=$(cat "$D/unsettled-reads" 2>/dev/null || printf 0)
+        if [ "$unsettled" = forever ] || [ "$unsettled" -gt 0 ]; then
+          [ "$unsettled" = forever ] || printf '%s' "$((unsettled - 1))" > "$D/unsettled-reads"
+          printf 'composer unsettled\n' >> "$D/events"
+          printf '✻ Finishing the turn…\n\n'
+          exit 0
+        fi
+        printf 'composer settled\n' >> "$D/events"
+        ;;
+    esac
     if [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
@@ -244,6 +261,7 @@ run_control() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_COMPOSER_WAIT="${FM_CONTROL_COMPOSER_WAIT:-0.05}" \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -428,6 +446,64 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+test_relaunch_waits_for_a_settling_composer_before_exit() {
+  local dir out rc last_unsettled first_exit
+  # Without a settle window, the same pane refuses on its first unsettled read:
+  # that is the divergence the window exists to absorb.
+  dir=$(new_case settle-none rl45)
+  add_ship_task "$dir" rl45 claude
+  printf 3 > "$dir/fake/unsettled-reads"
+  out=$(FM_CONTROL_COMPOSER_WAIT=0 \
+    run_control "$dir" rl45 relaunch --note "the pane is still finishing a turn"); rc=$?
+  expect_code 1 "$rc" "with no settle window the first unsettled composer read must refuse"$'\n'"$out"
+  assert_contains "$out" "not proven empty" "the no-window refusal should name the unproven composer"
+  [ "$(cat "$dir/fake/unsettled-reads")" = 2 ] \
+    || fail "the no-window relaunch should have read the composer exactly once"
+
+  dir=$(new_case settle-window rl46)
+  add_ship_task "$dir" rl46 claude
+  printf 3 > "$dir/fake/unsettled-reads"
+  out=$(run_control "$dir" rl46 relaunch --note "the pane is still finishing a turn"); rc=$?
+
+  expect_code 0 "$rc" "a composer that settles within the window must not refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "relaunched rl46" "the relaunch should complete once the composer settles"
+  [ "$(cat "$dir/fake/unsettled-reads")" = 0 ] \
+    || fail "the relaunch should have spent every unsettled composer read before exiting"
+  [ "$(grep -c '^/exit$' "$dir/fake/literal")" = 1 ] \
+    || fail "the exit command should be typed exactly once"
+  last_unsettled=$(grep -n '^composer unsettled$' "$dir/fake/events" | tail -1 | cut -d: -f1)
+  first_exit=$(grep -n '^literal /exit$' "$dir/fake/events" | head -1 | cut -d: -f1)
+  [ -n "$last_unsettled" ] && [ -n "$first_exit" ] && [ "$last_unsettled" -lt "$first_exit" ] \
+    || fail "the exit command was typed before the composer settled"
+  sed -n "$((last_unsettled + 1)),$((first_exit - 1))p" "$dir/fake/events" \
+    | grep -qx 'composer settled' \
+    || fail "the exit command must follow a proven-empty composer read"
+  pass "fm-control relaunch: a composer still settling after a turn is re-read until proven empty"
+}
+
+test_relaunch_refuses_when_the_composer_never_settles() {
+  local dir out rc reads
+  dir=$(new_case settle-never rl47)
+  add_ship_task "$dir" rl47 claude
+  printf forever > "$dir/fake/unsettled-reads"
+
+  out=$(run_control "$dir" rl47 relaunch --note "the pane never settles"); rc=$?
+
+  expect_code 1 "$rc" "a composer that never proves empty must still refuse"$'\n'"$out"
+  assert_contains "$out" "not proven empty within" \
+    "the refusal should say the composer never proved empty within the window"
+  assert_not_contains "$out" "visibly holds pending text" \
+    "an unsettled composer is not the same claim as observed pending text"
+  reads=$(grep -c '^composer unsettled$' "$dir/fake/events")
+  [ "$reads" -gt 1 ] \
+    || fail "the composer should have been re-read within the window before refusing (reads: $reads)"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unsettled composer refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be typed into a composer that never proved empty"
+  pass "fm-control relaunch: a composer that never settles keeps the conservative refusal"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -2560,6 +2636,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_waits_for_a_settling_composer_before_exit
+test_relaunch_refuses_when_the_composer_never_settles
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_preserves_registered_merge_poll
