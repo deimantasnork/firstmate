@@ -78,4 +78,4 @@ bin/fm-test-run.sh tests/fm-account-choose.test.sh
 bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The first pins the declaration order, the reserve, the pin and optional-pin paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's pinned stores across a recovery respawn, and the refusal before any record is published.
+The first pins the declaration order, the reserve and a closed 100 percent reserve, the pin and optional-pin paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's pinned stores across a recovery respawn, and the refusal before any record is published.

@@ -356,6 +356,128 @@ test_reserve_does_not_apply_to_codex() {
   pass "the reserve applies only to the vendor it names"
 }
 
+# --- closed reserve (a reserve of 100) --------------------------------------
+
+# write_closed_config <colleague-claude-reserve> - the colleague's store first,
+# so fill-first would reach it before the captain's own store.
+write_closed_config() {
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "colleague", "claude_config_dir": "$FIXTURE/store-colleague", "reserve": { "claude": $1 } },
+    { "name": "captain", "claude_config_dir": "$FIXTURE/store-captain" }
+  ]
+}
+JSON
+}
+
+test_closed_reserve_disqualifies_an_unmeasurable_store() {
+  local out status log colleague captain
+  setup_case closed-unmeasurable
+  colleague="$FIXTURE/store-colleague"
+  captain="$FIXTURE/store-captain"
+  # An expired access token: quota-axi prints an unknown snapshot and exits 1.
+  write_store "$colleague" "$(unknown_json claude)" 1
+  write_store "$captain" "$(quota_json claude 64 through_reset captain@example.com all_models)"
+  write_closed_config 100
+
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 0 "$status" "the open account should be selected past the closed one"$'\n'"$out"
+  [ "$(field "$out" selected)" = captain ] || fail "a closed reserve did not hold an unmeasurable store: $out"
+  [ "$(field "$out" store)" = "$captain" ] || fail "the wrong store was selected: $out"
+  assert_contains "$out" "candidate=colleague store=$colleague measured=unknown percent=unknown runway=unknown -> skipped:its 100% reserve closes it to automatic selection" \
+    "the closed-reserve skip was not recorded on the candidate line: $out"
+  log=$(cat "$QUOTA_LOG")
+  assert_not_contains "$log" "CLAUDE_CONFIG_DIR=$colleague" "a closed store still had its quota read: $log"
+
+  # Measurable headroom does not reopen it either.
+  write_store "$colleague" "$(quota_json claude 90 through_reset colleague@example.com all_models)"
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 0 "$status" "a measured closed store should still be passed over"$'\n'"$out"
+  [ "$(field "$out" selected)" = captain ] || fail "measured headroom reopened a closed store: $out"
+  assert_contains "$out" "-> skipped:its 100% reserve closes it to automatic selection" \
+    "the measured closed store was not skipped for its reserve: $out"
+
+  # With nothing else usable the selection refuses rather than landing on it.
+  write_store "$colleague" "$(unknown_json claude)" 1
+  write_store "$captain" "$(quota_json claude 0 exhausted_now captain@example.com all_models)"
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 3 "$status" "a closed store must not be the fallback when the rest are exhausted"$'\n'"$out"
+  assert_not_contains "$out" "selected=" "a store was selected with every account disqualified: $out"
+  assert_contains "$out" "candidate=colleague store=$colleague measured=unknown percent=unknown runway=unknown -> skipped:its 100% reserve closes it to automatic selection" \
+    "the refusal did not report the closed store's evidence: $out"
+  assert_contains "$out" "candidate=captain store=$captain measured=yes percent=0 runway=exhausted_now -> skipped:runway exhausted_now at all_models" \
+    "the refusal did not report the exhausted store's evidence: $out"
+  pass "a 100 percent reserve closes an account to automatic selection even when its headroom is unmeasurable"
+}
+
+test_unmeasurable_store_below_a_closed_reserve_stays_selectable() {
+  local out status colleague
+  setup_case open-unmeasurable
+  colleague="$FIXTURE/store-colleague"
+  write_store "$colleague" "$(unknown_json claude)" 1
+  write_store "$FIXTURE/store-captain" "$(quota_json claude 64 through_reset captain@example.com all_models)"
+  write_closed_config 99
+
+  out=$(choose --vendor claude)
+  status=$?
+  expect_code 0 "$status" "an unmeasurable store below a closed reserve must stay selectable"$'\n'"$out"
+  [ "$(field "$out" selected)" = colleague ] || fail "a 99 percent reserve blocked an unmeasurable store: $out"
+  [ "$(field "$out" measured)" = no ] || fail "the unmeasurable headroom was not disclosed: $out"
+  assert_contains "$out" "candidate=colleague store=$colleague measured=no percent=unknown runway=unknown -> selected:headroom unmeasurable (quota-axi reports no measurable window)" \
+    "the unmeasurable store was not reported as disclosed uncertainty: $out"
+  pass "an unmeasurable store whose reserve is below 100 stays disclosed uncertainty"
+}
+
+test_pin_selects_an_account_with_a_closed_reserve() {
+  local out status log colleague captain
+  setup_case closed-pin
+  colleague="$FIXTURE/store-colleague"
+  captain="$FIXTURE/store-captain"
+  write_store "$colleague" "$(unknown_json claude)" 1
+  write_store "$captain" "$(quota_json claude 64 through_reset captain@example.com all_models)"
+  write_closed_config 100
+
+  out=$(choose --vendor claude --pin colleague)
+  status=$?
+  expect_code 0 "$status" "an explicit pin must select a closed account"$'\n'"$out"
+  [ "$(field "$out" selected)" = colleague ] || fail "the pin did not select the closed account: $out"
+  [ "$(field "$out" pin)" = yes ] || fail "the pin was not disclosed: $out"
+  [ "$(field "$out" store_env)" = CLAUDE_CONFIG_DIR ] || fail "wrong store variable for claude: $out"
+  [ "$(field "$out" measured)" = no ] || fail "the pinned store's unmeasurable headroom was not reported: $out"
+  log=$(cat "$QUOTA_LOG")
+  assert_contains "$log" "CLAUDE_CONFIG_DIR=$colleague" "the pin did not report its own store's evidence: $log"
+
+  out=$(choose --vendor claude --pin colleague --pin-optional)
+  status=$?
+  expect_code 0 "$status" "an optional pin that applies must select a closed account"$'\n'"$out"
+  [ "$(field "$out" selected)" = colleague ] || fail "the optional pin did not select the closed account: $out"
+  [ "$(field "$out" pin)" = yes ] || fail "the optional pin was not disclosed: $out"
+
+  # An optional pin that falls through selects automatically, closure included.
+  mkdir -p "$FIXTURE/store-codex-only"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "colleague", "claude_config_dir": "$colleague", "reserve": { "claude": 100 } },
+    { "name": "captain", "claude_config_dir": "$captain" },
+    { "name": "codex-only", "codex_home": "$FIXTURE/store-codex-only" }
+  ]
+}
+JSON
+  out=$(choose --vendor claude --pin codex-only --pin-optional)
+  status=$?
+  expect_code 0 "$status" "a fallen-through optional pin should select automatically"$'\n'"$out"
+  [ "$(field "$out" selected)" = captain ] || fail "the fall-through selected a closed account: $out"
+  [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was reported as the pin: $out"
+  assert_contains "$out" "-> skipped:its 100% reserve closes it to automatic selection" \
+    "the fall-through did not skip the closed account: $out"
+  pass "an explicit pin still selects an account whose reserve is 100"
+}
+
 test_unmeasurable_first_account_is_selected_as_disclosed_uncertainty() {
   local out status
   setup_case unmeasurable-first
@@ -853,7 +975,7 @@ test_every_store_lacking_the_model_refuses() {
     "the first refusal evidence was not reported: $out"
   assert_contains "$out" "candidate=secondary store=$STORE_B measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise gpt-6-sol" \
     "the second refusal evidence was not reported: $out"
-  assert_contains "$out" "error: no codex account is usable: every configured account was disqualified on measured evidence" \
+  assert_contains "$out" "error: no codex account is usable: every configured account was closed by its reserve or disqualified on measured evidence" \
     "the existing refusal diagnostic changed: $out"
   log=$(cat "$QUOTA_LOG")
   [ -z "$log" ] || fail "stores that cannot serve the model still had their quota read: $log"
@@ -944,6 +1066,9 @@ test_reserve_floor_holds_the_colleagues_claude_account
 test_fractional_percent_and_reserve_still_hold_the_floor
 test_reserve_floor_holds_at_the_boundary_and_a_pin_still_selects
 test_reserve_does_not_apply_to_codex
+test_closed_reserve_disqualifies_an_unmeasurable_store
+test_unmeasurable_store_below_a_closed_reserve_stays_selectable
+test_pin_selects_an_account_with_a_closed_reserve
 test_unmeasurable_first_account_is_selected_as_disclosed_uncertainty
 test_nonzero_quota_exit_still_reads_its_valid_snapshot
 test_unreadable_snapshot_is_disclosed_uncertainty

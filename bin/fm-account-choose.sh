@@ -15,15 +15,18 @@
 # credential file.
 #
 # Selection is fill-first over the accounts' declaration order: the first
-# account declaring a store for this vendor whose own measured evidence does not
-# disqualify it is chosen, so an earlier account is drained down toward its
-# reserve before the next one is touched. An account is disqualified only on
-# measured evidence: a runway of `exhausted_now`, a known effective remaining
-# percent of zero, or a known percent at or below that account's configured
-# reserve for the vendor. Unmeasurable headroom - a store
-# quota-axi cannot read at all, including an expired access token that only a
-# real vendor call would refresh - is disclosed uncertainty, never a block, so
-# such an account stays selectable and is reported as `measured=no`.
+# account declaring a store for this vendor that is neither closed nor
+# disqualified by its own measured evidence is chosen, so an earlier account is
+# drained down toward its reserve before the next one is touched. A reserve of
+# 100 for the vendor closes that account to automatic selection on
+# configuration alone, before any quota read, whether or not its headroom is
+# measurable. Otherwise an account is disqualified only on measured evidence: a
+# runway of `exhausted_now`, a known effective remaining percent of zero, or a
+# known percent at or below that account's configured reserve for the vendor.
+# Unmeasurable headroom - a store quota-axi cannot read at all, including an
+# expired access token that only a real vendor call would refresh - is
+# disclosed uncertainty, never a block, so such an account with a reserve below
+# 100 stays selectable and is reported as `measured=no`.
 #
 # --model <name> names the model a codex dispatch will launch (codex only, since
 # a Codex store carries its own installed model catalog). Each candidate's own
@@ -36,8 +39,9 @@
 # --model no catalog is read and selection is exactly as described above.
 #
 # --pin <name> selects one account explicitly and bypasses every eligibility
-# rule: a pin is firstmate's or the captain's own decision, so a reserve, an
-# exhausted window, or a catalog without the named model never overrides it.
+# rule: a pin is firstmate's or the captain's own decision, so a reserve
+# (including a closed one), an exhausted window, or a catalog without the named
+# model never overrides it.
 # The pin's own evidence, including its catalog evidence, is still reported.
 # --pin-optional softens that pin for a caller resolving SEVERAL vendors with one
 # account name, such as a secondmate home that must hold one store per vendor:
@@ -87,9 +91,9 @@
 #   1   usage or configuration error (unreadable or malformed
 #       config/crew-accounts.json, an unknown pin, a pin with no store for this
 #       vendor, a store path that is not an existing directory, or missing jq)
-#   3   every configured account for this vendor was disqualified on measured
-#       quota or catalog evidence; the candidate lines say why, and nothing was
-#       selected
+#   3   every configured account for this vendor was closed by a 100 percent
+#       reserve or disqualified on measured quota or catalog evidence; the
+#       candidate lines say why, and nothing was selected
 #
 # Environment:
 #   FM_CONFIG_OVERRIDE  select the config directory outright (tests and
@@ -598,6 +602,14 @@ for name in "${CANDIDATES[@]}"; do
     CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=unknown percent=unknown runway=unknown -> not-considered:an earlier account was selected' "$name" "$store")")
     continue
   fi
+  # A reserve of 100 is a closure, decisive from configuration alone, so it is
+  # checked before any catalog or quota read and holds even when the store's
+  # headroom could never be measured.
+  reserve=$(account_reserve "$name" "$VENDOR")
+  if awk -v r="$reserve" 'BEGIN { exit !(r >= 100) }'; then
+    CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=unknown percent=unknown runway=unknown -> skipped:its %s%% reserve closes it to automatic selection' "$name" "$store" "$reserve")")
+    continue
+  fi
   catalog_note=
   if [ -n "$MODEL" ]; then
     catalog_evidence "$store"
@@ -609,7 +621,6 @@ for name in "${CANDIDATES[@]}"; do
   fi
   probe_store "$VENDOR" "$store"
   read -r measured pct runway identity scope <<<"$(probe_evidence "$VENDOR")"
-  reserve=$(account_reserve "$name" "$VENDOR")
   if [ "$measured" != yes ]; then
     SELECTED=$name
     SELECTED_STORE=$store
@@ -650,7 +661,7 @@ for line in "${CANDIDATE_LINES[@]}"; do
 done
 
 if [ -z "$SELECTED" ]; then
-  printf 'error: no %s account is usable: every configured account was disqualified on measured evidence\n' "$VENDOR" >&2
+  printf 'error: no %s account is usable: every configured account was closed by its reserve or disqualified on measured evidence\n' "$VENDOR" >&2
   exit 3
 fi
 
