@@ -28,6 +28,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-staging-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -227,7 +229,7 @@ EOF
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$ses" > "$dir/fake/session-name"
   printf '%s' "$wt" > "$dir/fake/cwd"
-  TASK_TMPS+=("/tmp/fm-$id")
+  TASK_TMPS+=("/tmp/fm-$id" "$(fm_task_launch_dir "$id" "$home")")
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1320,6 +1322,139 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   assert_contains "$out" "status cannot be inspected" "the refusal should name the failed dirty-state proof"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "status inspection failure must not stop the agent"
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
+}
+
+path_mode() {  # <path>
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
+# Each staging case uses a pid-suffixed id: the staging directories live at
+# predictable paths under the shared /tmp, so a fixed id could meet another run's.
+test_checkpoint_refuses_an_unusable_staging_directory_before_stopping() {
+  local dir out rc id before target launch_dir
+  id="rlstage-link-$$"
+  dir=$(new_case stage-link "$id")
+  add_ship_task "$dir" "$id" claude
+  before=$(cat "$dir/home/state/$id.meta")
+  # A link at the temp root is refused even when it points at a private
+  # directory this user owns: only a real directory at that path is usable.
+  target="$dir/private-target"
+  mkdir "$target"
+  chmod 700 "$target"
+  rm -rf "/tmp/fm-$id"
+  ln -s "$target" "/tmp/fm-$id"
+  out=$(run_control "$dir" "$id" relaunch --note "x"); rc=$?
+  rm -f "/tmp/fm-$id"
+  expect_code 1 "$rc" "an unusable temp root should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "/tmp/fm-$id already exists and is not a private directory owned by this user" \
+    "the refusal should name the unusable temp root"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an unusable temp root must refuse before the agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "an unusable temp root must refuse before anything is sent"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] \
+    || fail "an unusable temp root must leave the durable record byte-identical"
+  [ "$(path_mode "$target")" = 700 ] && [ -z "$(ls -A "$target")" ] \
+    || fail "the refusal must not write through the link"
+
+  # The launch namespace is prepared in the same checkpoint, so a non-directory
+  # there refuses before the stop too.
+  id="rlstage-file-$$"
+  dir=$(new_case stage-file "$id")
+  add_ship_task "$dir" "$id" claude
+  launch_dir=$(fm_task_launch_dir "$id" "$dir/home")
+  rm -rf "$launch_dir"
+  printf 'not a directory\n' > "$launch_dir"
+  out=$(run_control "$dir" "$id" relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an unusable launch namespace should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "$launch_dir already exists and is not a private directory owned by this user" \
+    "the refusal should name the unusable launch namespace"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an unusable launch namespace must refuse before the agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "an unusable launch namespace must refuse before anything is sent"
+  [ "$(cat "$launch_dir")" = "not a directory" ] || fail "the refusal must leave the occupying file untouched"
+  rm -f "$launch_dir"
+
+  # An owned root that others could write into is repaired only when its content
+  # is provably this user's own: a hard-linked file could have been planted.
+  id="rlstage-linked-$$"
+  dir=$(new_case stage-linked "$id")
+  add_ship_task "$dir" "$id" claude
+  rm -rf "/tmp/fm-$id"
+  mkdir "/tmp/fm-$id"
+  printf 'shared inode\n' > "/tmp/fm-$id/one"
+  ln "/tmp/fm-$id/one" "/tmp/fm-$id/two"
+  chmod 775 "/tmp/fm-$id"
+  out=$(run_control "$dir" "$id" relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an owned writable temp root with a hard-linked file should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "/tmp/fm-$id was writable by other users and holds /tmp/fm-$id/" \
+    "the refusal should name the entry that is not this user's own unshared content"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "unproven temp root content must refuse before the agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "unproven temp root content must refuse before anything is sent"
+  pass "fm-control relaunch: an unusable staging directory refuses before the agent is stopped"
+}
+
+test_relaunch_repairs_an_owned_group_writable_temp_root() {
+  local dir out rc id root
+  id="rlstage-repair-$$"
+  dir=$(new_case stage-repair "$id")
+  add_ship_task "$dir" "$id" claude
+  # The shape an older spawn left behind under a looser umask: this user's own
+  # directory and content, group-writable.
+  root="/tmp/fm-$id"
+  rm -rf "$root"
+  mkdir -p "$root/gotmp"
+  printf 'earlier incarnation\n' > "$root/launch.sh"
+  chmod 775 "$root" "$root/gotmp"
+  out=$(run_control "$dir" "$id" relaunch --note "repair the temp root"); rc=$?
+  expect_code 0 "$rc" "an owned group-writable temp root should be repaired, not refused"$'\n'"$out"
+  assert_contains "$out" "relaunched $id harness=claude" "the relaunch should complete"
+  assert_contains "$out" "made it private" "the repair should be reported"
+  [ "$(path_mode "$root")" = 700 ] || fail "the temp root should be private after the repair, got $(path_mode "$root")"
+  [ "$(cat "$root/launch.sh")" = "earlier incarnation" ] || fail "the repair must leave this user's own content in place"
+  [ "$(journal_field "$dir" "$id" staging)" = repaired ] \
+    || fail "the checkpoint should record the repair, got '$(journal_field "$dir" "$id" staging)'"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: an owned group-writable temp root is made private and the relaunch proceeds"
+}
+
+# A directory owned by another user cannot be created at /tmp/fm-<id> without
+# chown privilege, so the ownership refusal is pinned on the helper the
+# checkpoint above calls, against a real root-owned directory. As root that
+# directory is this user's own, and the relaunch-level case runs instead.
+test_staging_directory_owned_by_another_user_still_refuses() {
+  local candidate foreign='' mode_before dir out rc id root
+  if [ "$(id -u)" != 0 ]; then
+    for candidate in /etc /usr/bin /sbin /; do
+      if [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ ! -O "$candidate" ]; then
+        foreign=$candidate
+        break
+      fi
+    done
+    [ -n "$foreign" ] || fail "no directory owned by another user was found to stand in for a foreign temp root"
+    mode_before=$(path_mode "$foreign")
+    FM_TASK_STAGING_ERROR=
+    ! fm_task_staging_dir_prepare "task temp root" "$foreign" 2>/dev/null \
+      || fail "a directory owned by another user must be refused"
+    assert_contains "$FM_TASK_STAGING_ERROR" "task temp root $foreign already exists and is not a private directory owned by this user" \
+      "the refusal should name the directory owned by another user"
+    [ "$(path_mode "$foreign")" = "$mode_before" ] || fail "the refusal must not change another user's directory"
+    pass "fm-control relaunch: a staging directory owned by another user is still refused"
+    return 0
+  fi
+  id="rlstage-foreign-$$"
+  dir=$(new_case stage-foreign "$id")
+  add_ship_task "$dir" "$id" claude
+  root="/tmp/fm-$id"
+  rm -rf "$root"
+  mkdir "$root"
+  chmod 775 "$root"
+  chown 1 "$root" || fail "could not hand the temp root to another user as root"
+  out=$(run_control "$dir" "$id" relaunch --note "x"); rc=$?
+  rm -rf "$root"
+  expect_code 1 "$rc" "a temp root owned by another user should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "$root already exists and is not a private directory owned by this user" \
+    "the refusal should name the temp root owned by another user"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a foreign temp root must refuse before the agent is stopped"
+  pass "fm-control relaunch: a temp root owned by another user is still refused before the stop"
 }
 
 # --- 5. failure after the agent is stopped -----------------------------------
@@ -2461,6 +2596,9 @@ test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
+test_checkpoint_refuses_an_unusable_staging_directory_before_stopping
+test_relaunch_repairs_an_owned_group_writable_temp_root
+test_staging_directory_owned_by_another_user_still_refuses
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
