@@ -331,7 +331,7 @@
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
-#   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
+#   receives the store the per-account selection below chooses, and Pi the
 #   destination pane's ambient account. A present file pins every launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
@@ -610,6 +610,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -2442,21 +2444,28 @@ fi
 # (docs/configuration.md "Crew accounts" owns the schema). This block picks the
 # account this spawn runs on, before any worktree or endpoint exists, and
 # forwards the chosen store as CODEX_HOME or CLAUDE_CONFIG_DIR so the choice is
-# per-dispatch rather than ambient. With no config file the whole block is inert
-# and the launch keeps today's behavior: a pre-set CLAUDE_CONFIG_DIR is
-# forwarded verbatim, and an unset one means the CLI's own default store.
+# per-dispatch rather than ambient. In a primary home with no config file the
+# whole block is inert and the launch keeps today's behavior: a pre-set
+# CLAUDE_CONFIG_DIR is forwarded verbatim, and an unset one means the CLI's own
+# default store.
 #
 # Precedence per vendor: an explicit --account pin (including the pin recorded
 # for a relaunch), then a store already recorded for a secondmate home, then
-# automatic fill-first selection. A secondmate home is pinned to
-# one store per vendor (its own recorded stores), so it never auto-selects: its
-# crewmates inherit the home's stores from the home's own environment, and only
-# an --account that home's own config/crew-accounts.json resolves moves one
-# worker off them; a pin that home cannot resolve is ignored with a notice.
+# automatic fill-first selection. A secondmate home is pinned to one store per
+# vendor (its own recorded stores), so a crewmate it spawns runs on the store
+# the home's own secondmate record names, read through account_home_identity
+# below and never from this process's environment: an agent's shell can
+# re-source a profile that points the ambient store at another account. Only an
+# --account that home's own config/crew-accounts.json resolves moves one worker
+# off it; a pin that home cannot resolve is ignored with a notice. A home with
+# no recorded store for the vendor selects from its own accounts file, and with
+# neither it pins the CLI's own default store (ACCOUNT_HOME_DEFAULT) rather than
+# forwarding the ambient one.
 ACCOUNT_VENDOR=
 ACCOUNT_NAME=
 ACCOUNT_STORE=
 ACCOUNT_PIN=no
+ACCOUNT_HOME_DEFAULT=0
 SM_CODEX_NAME=
 SM_CODEX_STORE=
 SM_CLAUDE_NAME=
@@ -2520,6 +2529,41 @@ account_pin_resolves_here() {  # <vendor> <name>
     return 0
   fi
   [ -d "$resolved" ]
+}
+
+# account_home_identity <vendor>
+#   True when this secondmate home's own secondmate record names a store for
+#   <vendor>: the account_codex/codex_home or account_claude/claude_config_dir
+#   pair its parent recorded when it launched this home. The record is found
+#   through the home's durable identity marker and local parent binding
+#   (bin/fm-parent-channel-lib.sh), and only a secondmate record whose home is
+#   this very home is trusted. Sets ACCOUNT_HOME_NAME and ACCOUNT_HOME_STORE.
+#   A remote route, an unusable binding, a missing or foreign record, and a
+#   vendor the parent pinned no store for all return 1, leaving the home's own
+#   config/crew-accounts.json as its source.
+account_home_identity() {  # <vendor>
+  local vendor=$1 id record here recorded name_field store_field
+  ACCOUNT_HOME_NAME=
+  ACCOUNT_HOME_STORE=
+  case "$vendor" in
+  codex) name_field=account_codex store_field=codex_home ;;
+  claude) name_field=account_claude store_field=claude_config_dir ;;
+  *) return 1 ;;
+  esac
+  id=$(fm_parent_channel_home_id "$FM_HOME") || return 1
+  fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" || return 1
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+  record="$FM_SECONDMATE_PARENT_HOME/state/$id.meta"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(fm_meta_get "$record" kind)" = secondmate ] || return 1
+  recorded=$(fm_meta_get "$record" home)
+  [ -n "$recorded" ] || return 1
+  recorded=$(CDPATH='' cd -- "$recorded" 2>/dev/null && pwd -P) || return 1
+  here=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  [ "$recorded" = "$here" ] || return 1
+  ACCOUNT_HOME_STORE=$(fm_meta_get "$record" "$store_field")
+  [ -n "$ACCOUNT_HOME_STORE" ] || return 1
+  ACCOUNT_HOME_NAME=$(fm_meta_get "$record" "$name_field")
 }
 
 # account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1> [<codex-model>]
@@ -2637,22 +2681,40 @@ else
         ACCOUNT_PIN_NAME=$(fm_meta_get "$RELAUNCH_META" account)
       fi
       ACCOUNT_ALLOW_AUTO=1
+      ACCOUNT_HOME_RECORDED_NAME=-
+      ACCOUNT_HOME_RECORDED_STORE=-
       if [ "$SECONDMATE_HOME_MARKER" -eq 1 ]; then
-        ACCOUNT_ALLOW_AUTO=0
         if [ -n "$ACCOUNT_PIN_NAME" ] && ! account_pin_resolves_here "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME"; then
           echo "notice: secondmate home $FM_HOME cannot resolve --account $ACCOUNT_PIN_NAME; using the home's own $ACCOUNT_VENDOR store" >&2
           ACCOUNT_PIN_NAME=
+        fi
+        if [ -n "$WORKER_ACCOUNT" ]; then
+          # This home's own worker account pin already names the launch store.
+          ACCOUNT_ALLOW_AUTO=0
+        elif [ -z "$ACCOUNT_PIN_NAME" ] && account_home_identity "$ACCOUNT_VENDOR"; then
+          if [ ! -d "$ACCOUNT_HOME_STORE" ]; then
+            echo "error: secondmate home $FM_HOME is recorded on the $ACCOUNT_VENDOR store $ACCOUNT_HOME_STORE, which is not an existing directory; restore it or pin one explicitly with --account <name>" >&2
+            exit 1
+          fi
+          ACCOUNT_HOME_RECORDED_NAME=$ACCOUNT_HOME_NAME
+          ACCOUNT_HOME_RECORDED_STORE=$ACCOUNT_HOME_STORE
         fi
       fi
       ACCOUNT_MODEL=
       if [ "$ACCOUNT_VENDOR" = codex ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
         ACCOUNT_MODEL=$MODEL
       fi
-      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" - - "$ACCOUNT_ALLOW_AUTO" 0 "$ACCOUNT_MODEL"; then
+      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" "$ACCOUNT_HOME_RECORDED_NAME" "$ACCOUNT_HOME_RECORDED_STORE" "$ACCOUNT_ALLOW_AUTO" 0 "$ACCOUNT_MODEL"; then
         ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME
         ACCOUNT_STORE=$ACCOUNT_RESOLVED_STORE
         ACCOUNT_PIN=$ACCOUNT_RESOLVED_PIN
+        # The home's recorded store is re-read on every relaunch, so it is not
+        # an explicit pin on the task record.
+        [ "$ACCOUNT_HOME_RECORDED_STORE" = - ] || ACCOUNT_PIN=no
         ACCOUNT_EVIDENCE=$ACCOUNT_RESOLVED_EVIDENCE
+      elif [ "$SECONDMATE_HOME_MARKER" -eq 1 ] && [ -z "$WORKER_ACCOUNT" ]; then
+        ACCOUNT_HOME_DEFAULT=1
+        echo "notice: secondmate home $FM_HOME has no recorded or configured $ACCOUNT_VENDOR store; task $ID runs on the CLI's default store, not the ambient one" >&2
       fi
     fi
   fi
@@ -2828,7 +2890,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2 model=${3:-}
+  local harness=$1 effort=$2 model=${3:-} catalog_store
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
   claude)
@@ -2841,7 +2903,11 @@ effort_flag_for_harness() {
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      fm_codex_max_models "${SM_CODEX_STORE:-$ACCOUNT_STORE}" | jq -e --arg model "$model" 'index($model) != null' >/dev/null 2>&1 || return 0
+      catalog_store=${SM_CODEX_STORE:-$ACCOUNT_STORE}
+      # A secondmate home pinned to the CLI default store reads that store's
+      # catalog, never the ambient CODEX_HOME's.
+      [ -n "$catalog_store" ] || [ "$ACCOUNT_HOME_DEFAULT" != 1 ] || catalog_store="${HOME:-}/.codex"
+      fm_codex_max_models "$catalog_store" | jq -e --arg model "$model" 'index($model) != null' >/dev/null 2>&1 || return 0
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac
@@ -4534,7 +4600,7 @@ claude*)
   # into one store while the pane ran from another and wedged on the dialog.
   claude_trust_store=$ACCOUNT_STORE
   [ -n "$claude_trust_store" ] || claude_trust_store=$SM_CLAUDE_STORE
-  [ -n "$claude_trust_store" ] || claude_trust_store=${CLAUDE_CONFIG_DIR:-}
+  [ -n "$claude_trust_store" ] || [ "$ACCOUNT_HOME_DEFAULT" = 1 ] || claude_trust_store=${CLAUDE_CONFIG_DIR:-}
   if ! CLAUDE_CONFIG_DIR="$claude_trust_store" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
@@ -5305,11 +5371,13 @@ esac
 # replaces the per-dispatch forwarding: the launch names the pinned root (or
 # unsets the variable for the ordinary Claude account) and sheds the environment
 # credentials Claude ranks above the root's login. With no pin, forward the store
-# this spawn selected - the config/crew-accounts.json choice, or an explicit
-# --account pin - and otherwise fall back to firstmate's own ambient value, so a
-# crewmate uses the same credential/config firstmate is authenticated with. A
-# non-empty store is forwarded; Claude's default-store absence is pinned below
-# as well.
+# this spawn selected - the config/crew-accounts.json choice, an explicit
+# --account pin, or a secondmate home's own recorded store - and otherwise, in a
+# primary home only, fall back to firstmate's own ambient value, so a crewmate
+# uses the same credential/config firstmate is authenticated with. A non-empty
+# store is forwarded; Claude's default-store absence is pinned below as well,
+# and a secondmate home pinned to the default store unsets the codex variable
+# here so the pane's own environment cannot supply one.
 # A secondmate home's two stores are prefixed by its own block below.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
@@ -5326,7 +5394,7 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$KIND" != secondmate ]; then
   ACCOUNT_LAUNCH_STORE=$ACCOUNT_STORE
-  if [ -z "$ACCOUNT_LAUNCH_STORE" ] && [ -n "$ACCOUNT_VENDOR" ]; then
+  if [ -z "$ACCOUNT_LAUNCH_STORE" ] && [ -n "$ACCOUNT_VENDOR" ] && [ "$ACCOUNT_HOME_DEFAULT" != 1 ]; then
     case "$ACCOUNT_VENDOR" in
     codex) ACCOUNT_LAUNCH_STORE=${CODEX_HOME:-} ;;
     claude) ACCOUNT_LAUNCH_STORE=${CLAUDE_CONFIG_DIR:-} ;;
@@ -5334,6 +5402,8 @@ elif [ "$KIND" != secondmate ]; then
   fi
   if [ -n "$ACCOUNT_VENDOR" ] && [ -n "$ACCOUNT_LAUNCH_STORE" ]; then
     LAUNCH="$(account_store_env_for_vendor "$ACCOUNT_VENDOR")=$(shell_quote "$ACCOUNT_LAUNCH_STORE") $LAUNCH"
+  elif [ "$ACCOUNT_HOME_DEFAULT" = 1 ] && [ "$ACCOUNT_VENDOR" = codex ]; then
+    LAUNCH="env -u CODEX_HOME $LAUNCH"
   fi
 fi
 if [ "$KIND" = secondmate ]; then
@@ -5358,10 +5428,10 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   # Deliver each vendor's store into the home's own environment so the home's
-  # agent AND every crewmate it later spawns inherit it: that is what keeps one
-  # secondmate home on a single store per vendor (AGENTS.md section 4). The
-  # recorded store wins and firstmate's own ambient value is the fallback, so a
-  # config-less home keeps today's behavior.
+  # agent runs on it; the crewmates it later spawns read the same recorded store
+  # from this task record (account_home_identity), because the agent's own shell
+  # can replace that environment. The recorded store wins and firstmate's own
+  # ambient value is the fallback, so a config-less home keeps today's behavior.
   sm_codex_store=$SM_CODEX_STORE
   [ -n "$sm_codex_store" ] || sm_codex_store=${CODEX_HOME:-}
   sm_claude_store=$SM_CLAUDE_STORE
