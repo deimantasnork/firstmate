@@ -1138,8 +1138,9 @@ An absent file means every spawn keeps today's single-store behavior.
 Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single owner:
 
 - The candidates are that vendor's accounts in order, and each is measured by one `quota-axi --provider <vendor> --profile-only --json` read with that account's own store in `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the evidence is per account rather than ambient and nothing is refreshed or written.
-- An account is disqualified only on measured evidence: an `exhausted_now` runway, a known 0 percent, or a known percent at or below its own reserve.
+- An account is disqualified only on measured evidence: an `exhausted_now` runway, a known 0 percent, a known percent at or below its own reserve, or a readable Codex catalog that does not list the dispatched model.
 - Unmeasurable headroom - a store `quota-axi` cannot read, including an expired access token that only a real vendor call would refresh - is disclosed uncertainty and never a block, so such an account stays selectable and is reported as `measured=no`.
+- A Codex dispatch that names a model reads each candidate store's own installed catalog before its quota, so a store that cannot serve the model is passed over without a quota read; an absent, unreadable, malformed, or empty catalog is disclosed uncertainty and never a block, and `bin/fm-codex-models-lib.sh` owns catalog discovery.
 - The first account that is not measurably disqualified is chosen, so an earlier account is drained down toward its reserve before the next one is touched.
 - When every account for that vendor is measurably disqualified the spawn refuses and prints the candidate evidence; an explicit pin still selects one.
 
@@ -1147,7 +1148,7 @@ Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single
 A pre-set store is forwarded only when this home has no account configuration; with the file present the per-dispatch selection wins over the ambient value.
 
 `--account <name>` pins one account for that task.
-A pin is an explicit decision, so it bypasses the fill-first order, the reserve, and the exhaustion check, and its own evidence is still reported.
+A pin is an explicit decision, so it bypasses the fill-first order, the reserve, the exhaustion check, and the model catalog check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
 A secondmate home is deliberately pinned to one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir`, reuses them on every relaunch and recovery respawn, ships them into its own environment, and never auto-selects for the crewmates it spawns, so its identity cannot drift between stores mid-flight; only an explicit `--account` moves one worker off them.
 An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with an existing store directory for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.

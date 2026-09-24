@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-account-choose.sh --vendor <codex|claude> [--pin <name>] [--config <file>]
-#                        [--probe-timeout <seconds>]
+#                        [--model <name>] [--probe-timeout <seconds>]
 #   fm-account-choose.sh --validate [--config <file>]
 #
 # One subscription account is one named entry in local config/crew-accounts.json
@@ -25,9 +25,20 @@
 # real vendor call would refresh - is disclosed uncertainty, never a block, so
 # such an account stays selectable and is reported as `measured=no`.
 #
+# --model <name> names the model a codex dispatch will launch (codex only, since
+# a Codex store carries its own installed model catalog). Each candidate's own
+# catalog is then read before its quota, through fm_codex_catalog_models in
+# bin/fm-codex-models-lib.sh, which owns catalog discovery. A candidate whose
+# readable catalog lists models but not this one provably cannot serve it and
+# is skipped without a quota read. An absent, unreadable, malformed, or empty
+# catalog is disclosed uncertainty, never a block: that candidate stays
+# selectable and its verdict says the model catalog was unmeasurable. Without
+# --model no catalog is read and selection is exactly as described above.
+#
 # --pin <name> selects one account explicitly and bypasses every eligibility
-# rule: a pin is firstmate's or the captain's own decision, so a reserve or an
-# exhausted window never overrides it. The pin's own evidence is still reported.
+# rule: a pin is firstmate's or the captain's own decision, so a reserve, an
+# exhausted window, or a catalog without the named model never overrides it.
+# The pin's own evidence, including its catalog evidence, is still reported.
 # --pin-optional softens that pin for a caller resolving SEVERAL vendors with one
 # account name, such as a secondmate home that must hold one store per vendor:
 # where the pinned account declares no store for this vendor, the selection
@@ -54,12 +65,21 @@
 #   percent=<0..100>|unknown   effective percent remaining (measured=yes only)
 #   runway=<status>|unknown    quota-axi runway status
 #   identity=<email>|unknown   the account identity quota-axi reported
+#   model=<name>               the named model (--model only)
+#   model_advertised=yes|no|unknown
+#                              whether the selected store's catalog lists that
+#                              model; unknown when the catalog was unmeasurable,
+#                              and no only for a pin (--model only)
 #   candidate=<name> store=<path> measured=<yes|no|unknown> percent=<n|unknown>
 #                             runway=<status|unknown> -> <verdict>
 #                              one line per candidate, in evaluation order;
-#                              verdict is `selected`, `selected:headroom
-#                              unmeasurable (<reason>)`, `skipped:<reason>`, or
-#                              `not-considered:<reason>`
+#                              verdict is `selected`, `selected:<disclosure>`,
+#                              `skipped:<reason>`, or `not-considered:<reason>`,
+#                              where a disclosure is `headroom unmeasurable
+#                              (<reason>)`, `model catalog unmeasurable
+#                              (<reason>)`, both joined by `; `, or, for a pin
+#                              only, `pinned although its model catalog does not
+#                              advertise <model>`
 #
 # Exit status:
 #   0   selected=<name>, or selected=none because this vendor has no configured
@@ -68,7 +88,8 @@
 #       config/crew-accounts.json, an unknown pin, a pin with no store for this
 #       vendor, a store path that is not an existing directory, or missing jq)
 #   3   every configured account for this vendor was disqualified on measured
-#       evidence; the candidate lines say why, and nothing was selected
+#       quota or catalog evidence; the candidate lines say why, and nothing was
+#       selected
 #
 # Environment:
 #   FM_CONFIG_OVERRIDE  select the config directory outright (tests and
@@ -86,6 +107,8 @@ CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-codex-models-lib.sh
+. "$SCRIPT_DIR/fm-codex-models-lib.sh"
 
 usage() {
   awk '
@@ -123,6 +146,7 @@ account_store_env() {  # <vendor>
 VENDOR=
 PIN=
 PIN_OPTIONAL=0
+MODEL=
 CONFIG_FILE=
 VALIDATE=0
 PROBE_TIMEOUT=${FM_ACCOUNT_PROBE_TIMEOUT:-20}
@@ -148,6 +172,11 @@ while [ "$#" -gt 0 ]; do
       PIN_OPTIONAL=1
       shift
       ;;
+    --model)
+      [ -n "${2-}" ] || die_usage "--model needs a value"
+      MODEL=$2
+      shift 2
+      ;;
     --config)
       [ -n "${2-}" ] || die_usage "--config needs a path"
       CONFIG_FILE=$2
@@ -168,11 +197,18 @@ esac
 if [ "$VALIDATE" -eq 1 ]; then
   [ -z "$PIN" ] || die_usage "--validate and --pin cannot be combined"
   [ -z "$VENDOR" ] || die_usage "--validate checks the whole file and takes no --vendor"
+  [ -z "$MODEL" ] || die_usage "--validate checks the whole file and takes no --model"
 else
   case "$VENDOR" in
     codex | claude) ;;
     '') die_usage "--vendor <codex|claude> is required" ;;
     *) die_usage "--vendor must be codex or claude (got '$VENDOR')" ;;
+  esac
+fi
+if [ -n "$MODEL" ]; then
+  [ "$VENDOR" = codex ] || die_usage "--model applies only to --vendor codex, whose store carries its own model catalog"
+  case "$MODEL" in
+    *[[:space:]]* | *[[:cntrl:]]*) die_usage "--model may not contain whitespace or control characters" ;;
   esac
 fi
 if [ -n "$PIN" ]; then
@@ -417,6 +453,30 @@ probe_failure_reason() {
   esac
 }
 
+# ---- model catalog evidence --------------------------------------------------
+
+CATALOG_ADVERTISED=
+CATALOG_REASON=
+
+# Sets CATALOG_ADVERTISED to yes, no, or unknown for MODEL in <store>'s own
+# catalog. Only a readable catalog that lists models but not MODEL is evidence
+# against the store; every other state is unknown, with CATALOG_REASON saying why.
+catalog_evidence() {  # <store>
+  local slugs
+  CATALOG_REASON=
+  if ! slugs=$(fm_codex_catalog_models "$1"); then
+    CATALOG_ADVERTISED=unknown
+    CATALOG_REASON='the store has no readable models_cache.json'
+  elif [ -z "$slugs" ]; then
+    CATALOG_ADVERTISED=unknown
+    CATALOG_REASON='the store catalog lists no models'
+  elif printf '%s\n' "$slugs" | grep -Fxq -- "$MODEL"; then
+    CATALOG_ADVERTISED=yes
+  else
+    CATALOG_ADVERTISED=no
+  fi
+}
+
 # ---- validation mode ---------------------------------------------------------
 
 if [ "$VALIDATE" -eq 1 ]; then
@@ -447,7 +507,7 @@ if ! load_config; then
   exit 0
 fi
 
-emit_selection() {  # <name> <store> <measured> <percent> <runway> <identity> <pin>
+emit_selection() {  # <name> <store> <measured> <percent> <runway> <identity> <pin> [<model-advertised>]
   printf 'selected=%s\n' "$1"
   printf 'vendor=%s\n' "$VENDOR"
   printf 'pin=%s\n' "$7"
@@ -461,6 +521,10 @@ emit_selection() {  # <name> <store> <measured> <percent> <runway> <identity> <p
   fi
   printf 'runway=%s\n' "$5"
   printf 'identity=%s\n' "$6"
+  if [ -n "$MODEL" ]; then
+    printf 'model=%s\n' "$MODEL"
+    printf 'model_advertised=%s\n' "$8"
+  fi
 }
 
 emit_candidate() {  # <name> <store> <measured> <percent> <runway> <verdict>
@@ -487,10 +551,19 @@ fi
 
 if [ -n "$PIN" ]; then
   PIN_STORE=$(require_store "$PIN" "$PIN_FIELD" "$PIN_RAW") || exit 1
+  PIN_VERDICT=selected
+  if [ -n "$MODEL" ]; then
+    catalog_evidence "$PIN_STORE"
+    case "$CATALOG_ADVERTISED" in
+      no) PIN_VERDICT="selected:pinned although its model catalog does not advertise $MODEL" ;;
+      unknown) PIN_VERDICT="selected:model catalog unmeasurable ($CATALOG_REASON)" ;;
+    esac
+  fi
   probe_store "$VENDOR" "$PIN_STORE"
   read -r PIN_MEASURED PIN_PCT PIN_RUNWAY PIN_IDENTITY _ <<<"$(probe_evidence "$VENDOR")"
-  emit_candidate "$PIN" "$PIN_STORE" "$PIN_MEASURED" "$PIN_PCT" "$PIN_RUNWAY" selected
-  emit_selection "$PIN" "$PIN_STORE" "$PIN_MEASURED" "$PIN_PCT" "$PIN_RUNWAY" "$PIN_IDENTITY" yes
+  emit_candidate "$PIN" "$PIN_STORE" "$PIN_MEASURED" "$PIN_PCT" "$PIN_RUNWAY" "$PIN_VERDICT"
+  emit_selection "$PIN" "$PIN_STORE" "$PIN_MEASURED" "$PIN_PCT" "$PIN_RUNWAY" "$PIN_IDENTITY" yes \
+    "$CATALOG_ADVERTISED"
   exit 0
 fi
 
@@ -515,6 +588,7 @@ SELECTED_MEASURED=
 SELECTED_PCT=
 SELECTED_RUNWAY=
 SELECTED_IDENTITY=
+SELECTED_ADVERTISED=
 
 for name in "${CANDIDATES[@]}"; do
   field=$(account_store_field "$VENDOR")
@@ -523,6 +597,15 @@ for name in "${CANDIDATES[@]}"; do
   if [ -n "$SELECTED" ]; then
     CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=unknown percent=unknown runway=unknown -> not-considered:an earlier account was selected' "$name" "$store")")
     continue
+  fi
+  catalog_note=
+  if [ -n "$MODEL" ]; then
+    catalog_evidence "$store"
+    if [ "$CATALOG_ADVERTISED" = no ]; then
+      CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise %s' "$name" "$store" "$MODEL")")
+      continue
+    fi
+    [ "$CATALOG_ADVERTISED" = yes ] || catalog_note="model catalog unmeasurable ($CATALOG_REASON)"
   fi
   probe_store "$VENDOR" "$store"
   read -r measured pct runway identity scope <<<"$(probe_evidence "$VENDOR")"
@@ -534,9 +617,10 @@ for name in "${CANDIDATES[@]}"; do
     SELECTED_PCT=$pct
     SELECTED_RUNWAY=$runway
     SELECTED_IDENTITY=$identity
+    SELECTED_ADVERTISED=$CATALOG_ADVERTISED
     reason=$(probe_failure_reason)
     [ "$reason" != none ] || reason='quota-axi reports no measurable window'
-    CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=%s percent=%s runway=%s -> selected:headroom unmeasurable (%s)' "$name" "$store" "$measured" "$pct" "$runway" "$reason")")
+    CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=%s percent=%s runway=%s -> selected:headroom unmeasurable (%s)%s' "$name" "$store" "$measured" "$pct" "$runway" "$reason" "${catalog_note:+; $catalog_note}")")
     continue
   fi
   verdict=
@@ -557,7 +641,8 @@ for name in "${CANDIDATES[@]}"; do
   SELECTED_PCT=$pct
   SELECTED_RUNWAY=$runway
   SELECTED_IDENTITY=$identity
-  CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=%s percent=%s runway=%s -> selected' "$name" "$store" "$measured" "$pct" "$runway")")
+  SELECTED_ADVERTISED=$CATALOG_ADVERTISED
+  CANDIDATE_LINES+=("$(printf 'candidate=%s store=%s measured=%s percent=%s runway=%s -> selected%s' "$name" "$store" "$measured" "$pct" "$runway" "${catalog_note:+:$catalog_note}")")
 done
 
 for line in "${CANDIDATE_LINES[@]}"; do
@@ -570,5 +655,5 @@ if [ -z "$SELECTED" ]; then
 fi
 
 emit_selection "$SELECTED" "$SELECTED_STORE" "$SELECTED_MEASURED" "$SELECTED_PCT" \
-  "$SELECTED_RUNWAY" "$SELECTED_IDENTITY" no
+  "$SELECTED_RUNWAY" "$SELECTED_IDENTITY" no "$SELECTED_ADVERTISED"
 exit 0

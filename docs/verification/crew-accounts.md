@@ -32,6 +32,31 @@ Two properties of the read are load-bearing and were confirmed directly:
 
 The ambient Codex `spendPriority` is not a stable signal across stores - it is a number on one store and absent or `unknown` on another - so the selection ranks on `effectivePercentRemaining` and `runway` and treats a missing `spendPriority` as unmeasured. This is the reason `docs/configuration.md` "Crew accounts" states the disqualifying evidence instead of a priority ordering.
 
+## Per-store model catalogs
+
+Verified 2026-09-24 with codex-cli 0.156.1 on a host carrying three Codex stores.
+Each store holds its own `models_cache.json`, and the stores do not advertise the same models:
+
+```sh
+jq -r '[.models[].slug] | sort | join(" ")' <codex-store>/models_cache.json
+```
+
+| Store | Advertised slugs |
+| --- | --- |
+| first codex store | `codex-auto-review gpt-5.5 gpt-5.6-luna gpt-5.6-sol gpt-5.6-terra gpt-6-astra gpt-6-luna gpt-6-sol gpt-reserve` |
+| second codex store | `codex-auto-review gpt-5.5 gpt-5.6-luna gpt-5.6-terra gpt-6-luna gpt-reserve` |
+| third codex store | `codex-auto-review gpt-5.5 gpt-5.6-luna gpt-5.6-sol gpt-5.6-terra gpt-6-astra gpt-6-luna gpt-6-sol gpt-reserve` |
+
+`gpt-reserve` and `codex-auto-review` carry `"visibility": "hide"` yet are listed, so hidden visibility is not evidence that a store cannot serve a model.
+Against those stores, `bin/fm-account-choose.sh --vendor codex --model gpt-6-sol` reported the second store as:
+
+```text
+candidate=<second-account> store=<second-codex-store> measured=unknown percent=unknown runway=unknown -> skipped:its model catalog does not advertise gpt-6-sol
+```
+
+The quota for that store was not read, because a store that cannot serve the model is skipped before its probe.
+The deterministic half is pinned by `tests/fm-codex-models-lib.test.sh` and the `--model` cases in `tests/fm-account-choose.test.sh`.
+
 ## Selection outcome on a two-store fleet
 
 Run against two local stores whose configuration shape is the one in `docs/examples/crew-accounts.json`:
