@@ -76,6 +76,10 @@
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
 #              agent stops.
+#              The task's staging directories are prepared the same way, before
+#              the stop (bin/fm-task-staging-lib.sh owns the rule), so a directory
+#              the launch owner would refuse refuses the relaunch while the old
+#              agent is still running.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -176,6 +180,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-task-staging-lib.sh
+. "$SCRIPT_DIR/fm-task-staging-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -861,12 +867,14 @@ resolve_relaunch_profile() {
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
-# must preserve is actually there and recoverable afterwards. Fills
-# CHECKPOINT_LINES with the journal lines describing what it proved, and
-# refuses outright when any of it cannot be established.
+# must preserve is actually there and recoverable afterwards, and that the
+# launch owner will be able to stage the replacement. Fills CHECKPOINT_LINES
+# with the journal lines describing what it proved, and refuses outright when
+# any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
   local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local staging=private launch_dir refusal
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -924,6 +932,20 @@ safe_checkpoint() {
     done
     CHECKPOINT_LINES+=("children=$children")
   fi
+  # The launch owner stages the replacement in the task's temp root and launch
+  # namespace, but only reaches them after the old agent has stopped. Preparing
+  # both here claims them - or repairs an owned one - while a refusal still
+  # changes nothing.
+  launch_dir=$(fm_task_launch_dir "$ID" "$FM_HOME") \
+    || die "could not derive a home identity for task $ID's launch directory; refusing to relaunch before stopping anything"
+  refusal="so the replacement could not be staged; refusing to relaunch before stopping anything; inspect and remove it, then retry"
+  fm_task_staging_dir_prepare "task temp root" "$(fm_task_temp_root "$ID")" \
+    || die "$FM_TASK_STAGING_ERROR, $refusal"
+  [ "$FM_TASK_STAGING_REPAIRED" = 0 ] || staging=repaired
+  fm_task_staging_dir_prepare "task launch directory" "$launch_dir" \
+    || die "$FM_TASK_STAGING_ERROR, $refusal"
+  [ "$FM_TASK_STAGING_REPAIRED" = 0 ] || staging=repaired
+  CHECKPOINT_LINES+=("staging=$staging")
 }
 
 # record_note: put the required progress note somewhere durable, and - for a

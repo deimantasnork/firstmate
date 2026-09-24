@@ -75,6 +75,8 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
+   The task's staging directories under `/tmp`, where the replacement's launch command is staged, are claimed or verified here too, so a directory the launch owner would refuse refuses the relaunch while the old agent is still running.
+   One this user owns whose mode lets others write into it is made private again when it holds only this user's own content; a link, a non-directory, or a directory owned by anyone else is still refused (`bin/fm-task-staging-lib.sh` owns the rule).
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
