@@ -124,12 +124,18 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#     Any other verdict short of proven empty is re-read for a bounded settle
+#     window, because a pane still finishing a turn can briefly draw a composer
+#     the classifier cannot yet prove; one that never settles still refuses,
+#     and the exit command is typed only after an exact `empty` read.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_ARM_WAIT          wait for an armed interrupt's rendered proof
 #                                after the press gap (1.5)
+#   FM_CONTROL_COMPOSER_WAIT     wait for a composer not yet proven empty to
+#                                settle before exit refuses (15)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -186,6 +192,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
+COMPOSER_WAIT=${FM_CONTROL_COMPOSER_WAIT:-15}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
@@ -389,6 +396,26 @@ wait_agent_state() {  # <timeout> <wanted>...
   done
   printf '%s' "$state"
   return 1
+}
+
+# wait_composer_settled <timeout>: re-read the composer until it is proven
+# empty or visibly pending, then print that verdict; on timeout, print the last
+# one. A pane still finishing a turn - a mate whose persist answer has already
+# landed, say - can draw a composer the classifier cannot prove for a moment, so
+# only a verdict that stays unproven for the whole bound is a refusal.
+wait_composer_settled() {  # <timeout>
+  local timeout=$1 verdict elapsed=0
+  while :; do
+    verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+      || verdict=unknown
+    case "$verdict" in
+      empty|pending) break ;;
+    esac
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$verdict"
 }
 
 require_state_verified_backend() {  # <verb>
@@ -630,15 +657,14 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
-    || composer_state=unknown
+  composer_state=$(wait_composer_settled "$COMPOSER_WAIT")
   case "$composer_state" in
     empty) ;;
     pending)
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      die "task $ID's composer state is '$composer_state', not proven empty within ${COMPOSER_WAIT}s; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command

@@ -116,7 +116,26 @@ case "${1:-}" in
       prev=$a
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    # The composer read is the one styled (-e) capture. Once the restart
+    # transaction named in unsettled-after exists, the modelled mate is still
+    # finishing the persist turn whose answer already landed: its input area
+    # shows no composer shape the classifier can prove, for the count held in
+    # unsettled-reads (or `forever`). Gating on that transaction keeps the
+    # persist request's own delivery reading a settled pane.
+    case " $* " in
+      *' -e '*)
+        if [ -f "$D/unsettled-after" ] && [ -e "$(cat "$D/unsettled-after")" ]; then
+          unsettled=$(cat "$D/unsettled-reads" 2>/dev/null || printf 0)
+          if [ "$unsettled" = forever ] || [ "$unsettled" -gt 0 ]; then
+            [ "$unsettled" = forever ] || printf '%s' "$((unsettled - 1))" > "$D/unsettled-reads"
+            printf '✻ Finishing the turn…\n\n'
+            exit 0
+          fi
+        fi
+        ;;
+    esac
+    printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -241,12 +260,21 @@ arm_answer() {
   printf '%s' "$dir/home/state/$id.status" > "$dir/fake/answer-status"
 }
 
+# arm_unsettled <case-dir> <id> <reads|forever>: once <id>'s restart transaction
+# opens, its pane is still finishing the persist turn for that many composer reads.
+arm_unsettled() {
+  local dir=$1 id=$2 reads=$3
+  printf '%s' "$dir/home/state/$id.control-relaunch" > "$dir/fake/unsettled-after"
+  printf '%s' "$reads" > "$dir/fake/unsettled-reads"
+}
+
 run_restart() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_COMPOSER_WAIT="${FM_TEST_COMPOSER_WAIT:-0.05}" \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     "$RESTART" "$@" 2>&1
 }
@@ -358,6 +386,60 @@ SH
   assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
   assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
   pass "T2c a reply between the preliminary scan and timeout decision wins"
+}
+
+# --- T2d: the relaunch waits out the persist turn's settle window ------------
+test_restart_tolerates_the_persist_turn_settle_window() {
+  local dir out rc
+  # The answer lands, the relaunch runs at once, and the pane is still finishing
+  # that persist turn. With no settle window the first composer read refuses.
+  dir=$(new_case settle-none)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  arm_unsettled "$dir" sm1 3
+  out=$(FM_TEST_COMPOSER_WAIT=0 run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "with no settle window the unsettled pane must refuse"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1: the restart outcome is unknown" \
+    "with no settle window the answered mate is left unreached"
+  assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
+
+  dir=$(new_case settle-window)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  arm_unsettled "$dir" sm1 3
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a pane that settles within the window must be restarted"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (claude)" "the answered mate should be restarted once its pane settles"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
+  [ "$(cat "$dir/fake/unsettled-reads")" = 0 ] \
+    || fail "the relaunch should have read through the whole settle window before exiting"
+  [ "$(grep -c '^/exit$' "$dir/fake/literal")" = 1 ] \
+    || fail "the exit command should be typed exactly once, after the pane settled"
+  pass "T2d an answered mate whose pane is still finishing the persist turn is restarted once it settles"
+}
+
+# --- T2e: a composer that never settles keeps the conservative refusal -------
+test_unsettled_composer_keeps_the_refusal() {
+  local dir out rc
+  dir=$(new_case settle-never)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  arm_unsettled "$dir" sm1 forever
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a composer that never proves empty must not be reported as a reload"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1: the restart outcome is unknown" \
+    "a refused relaunch must keep the honest unknown report"
+  assert_contains "$out" "not proven empty within" \
+    "the report should say the composer never proved empty within the window"
+  assert_not_contains "$out" "restarted: sm1" "a refused relaunch must not be reported as restarted"
+  assert_no_grep '^/exit$' "$dir/fake/literal" \
+    "the exit command must not be typed into a composer that never proved empty"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "no replacement may be launched"
+  pass "T2e a composer that never settles refuses the relaunch without typing the exit"
 }
 
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
@@ -851,6 +933,8 @@ test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
 test_answer_between_resolution_and_timeout_wins
+test_restart_tolerates_the_persist_turn_settle_window
+test_unsettled_composer_keeps_the_refusal
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
