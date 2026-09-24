@@ -430,11 +430,14 @@
 # seen and firstmate cannot answer it. That helper's header owns the structural
 # scope test for both shapes and every refusal; a failed registration stops this
 # spawn rather than launching a worker that would wedge on the dialog.
-# Unless config/keep-ai-trailers is present, every claude launch carries the
-# attribution-off policy in its per-launch --settings JSON, so a spawned worker
-# never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
-# line into a commit or PR body; launch_template() below owns the reason it
-# cannot come from the captain's own settings.
+# Right after that registration, every claude launch also links each shared
+# skill under $HOME/.agents/skills into the store it selected, when absent
+# there, through bin/fm-claude-skills.sh; a link it cannot make is a warning.
+# Unless config/keep-ai-trailers is present, every claude launch also carries
+# the attribution-off policy in its per-launch --settings JSON, so a spawned
+# worker never writes a Co-Authored-By trailer, Claude-Session link, or
+# generated-with line into a commit or PR body; launch_template() below owns
+# the reason it cannot come from the captain's own settings.
 # Cursor and the other non-Claude runtimes have no equivalent per-launch
 # settings overlay: Cursor injects a Co-Authored-By trailer at the tooling
 # layer after the worker types a clean message, and a per-machine
@@ -4640,6 +4643,17 @@ claude*)
   if ! CLAUDE_CONFIG_DIR="$claude_trust_store" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
+  fi
+  # Link the shared skills into the one store this launch reads, which the
+  # launch assembly below settles the same way: a home's worker account pin
+  # (already applied to CLAUDE_CONFIG_DIR above) outranks every per-dispatch
+  # store, and an empty store is Claude's default. bin/fm-claude-skills.sh owns
+  # the contract.
+  spawn_claude_store=$claude_trust_store
+  [ -z "$WORKER_ACCOUNT" ] || spawn_claude_store=${CLAUDE_CONFIG_DIR:-}
+  spawn_claude_store=${spawn_claude_store:-${HOME:-}/.claude}
+  if ! "$FM_ROOT/bin/fm-claude-skills.sh" "$spawn_claude_store" >/dev/null; then
+    echo "warning: could not link every shared skill into the Claude store $spawn_claude_store; the worker launches without the missing ones" >&2
   fi
   ;;
 agy)

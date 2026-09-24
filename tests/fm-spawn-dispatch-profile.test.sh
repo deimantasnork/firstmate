@@ -2083,7 +2083,7 @@ test_codex_spawn_skips_an_account_whose_catalog_lacks_the_model() {
 }
 
 test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
-  local rec id out status launch ambient meta
+  local rec id out status launch ambient meta shared
   id=account-claude-ambient-z9b
   rec=$(make_spawn_case account-claude-ambient claude "$id")
   read_case_record "$rec"
@@ -2100,6 +2100,8 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
   write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  shared="$HOME_DIR/user-home/.agents/skills"
+  mkdir -p "$shared/no-mistakes"
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$ambient" FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -2112,6 +2114,11 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store() {
     "$claude_a/.claude.json" >/dev/null \
     || fail "the exact worktree key was not trusted in the selected account's store"
   [ ! -e "$ambient/.claude.json" ] || fail "trust was registered in the ambient store"
+  assert_equals "$shared/no-mistakes" "$(readlink "$claude_a/skills/no-mistakes")" \
+    "the shared skills were not linked into the selected account's store"
+  assert_absent "$ambient/skills" "the shared skills were linked into the ambient store"
+  assert_absent "$claude_b/skills" "the shared skills were linked into an account this dispatch did not select"
+  assert_absent "$HOME_DIR/user-home/.claude/skills" "the shared skills were linked into the default store"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep "account=primary" "$meta" "the chosen account was not recorded on the task record"
   pass "a claude spawn selects per dispatch, ahead of an ambient store"

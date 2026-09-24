@@ -890,6 +890,9 @@ A remote secondmate is launched on its host from its own home's configuration, s
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
 
+Every Claude launch, pinned or not, also links each shared skill under `~/.agents/skills` into the `skills/` directory of the store it selected when that name is absent there, so a worker on any account store can run skills such as `/no-mistakes`.
+An existing entry in that store is never replaced, no other store is touched, and a link that cannot be made is a spawn warning rather than a refusal; [`bin/fm-claude-skills.sh`](../bin/fm-claude-skills.sh) owns the contract.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
