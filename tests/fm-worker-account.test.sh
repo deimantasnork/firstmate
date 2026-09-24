@@ -205,6 +205,65 @@ test_claude_ordinary_pin_unsets_the_config_root() {
   pass "an ordinary Claude pin selects the default login and drops an ambient root"
 }
 
+# shared_skills: the shared skills a Claude launch links into its store, in the
+# spawn's throwaway HOME. Echoes the shared skills directory.
+shared_skills() {
+  local shared="$HOME_DIR/user-home/.agents/skills"
+  mkdir -p "$shared/no-mistakes" "$shared/quota-axi"
+  printf '%s\n' "$shared"
+}
+
+test_claude_launch_links_shared_skills_into_the_selected_store_only() {
+  local out rc id=acct-skills shared
+  new_case skills-pin claude
+  shared=$(shared_skills)
+  signed_in_claude_root "$CASE/work"
+  mkdir -p "$CASE/work/skills/quota-axi"
+  printf 'store-local copy\n' > "$CASE/work/skills/quota-axi/SKILL.md"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "a pinned Claude spawn with shared skills should succeed: $out"
+  assert_equals "$shared/no-mistakes" "$(readlink "$CASE/work/skills/no-mistakes")" \
+    "the pinned store should receive a link to the shared skill it lacked"
+  [ -d "$CASE/work/skills/quota-axi" ] && [ ! -L "$CASE/work/skills/quota-axi" ] \
+    || fail "the pinned store's own skill directory must not be replaced by a link"
+  assert_grep 'store-local copy' "$CASE/work/skills/quota-axi/SKILL.md" \
+    "the pinned store's own skill must be untouched"
+  assert_absent "$CASE/ambient-claude/skills" "the ambient store the pin replaced must not receive links"
+  assert_absent "$HOME_DIR/user-home/.claude/skills" "the default store must not receive links"
+
+  new_case skills-unpinned claude
+  shared=$(shared_skills)
+  out=$(spawn_ship "$id-unpinned"); rc=$?
+  expect_code 0 "$rc" "an unpinned Claude spawn with shared skills should succeed: $out"
+  assert_equals "$shared/no-mistakes" "$(readlink "$CASE/ambient-claude/skills/no-mistakes")" \
+    "the forwarded store should receive the shared skills"
+  assert_equals "$shared/quota-axi" "$(readlink "$CASE/ambient-claude/skills/quota-axi")" \
+    "the forwarded store should receive every shared skill it lacked"
+  assert_absent "$HOME_DIR/user-home/.claude/skills" "the default store must not receive links"
+
+  # The home's pin outranks a per-dispatch account store, so only the pinned
+  # root receives the links. A fake quota-axi keeps the account choice offline.
+  new_case skills-pin-over-dispatch claude
+  shared=$(shared_skills)
+  signed_in_claude_root "$CASE/work"
+  mkdir -p "$CASE/dispatch-claude"
+  printf '{"accounts":[{"name":"primary","claude_config_dir":"%s"}]}\n' "$CASE/dispatch-claude" \
+    > "$HOME_DIR/config/crew-accounts.json"
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$FAKEBIN/quota-axi"
+  chmod +x "$FAKEBIN/quota-axi"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-over-dispatch" --account primary); rc=$?
+  expect_code 0 "$rc" "a pinned Claude spawn with a per-dispatch account should succeed: $out"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "the worker should run under the pinned root"
+  assert_equals "$shared/no-mistakes" "$(readlink "$CASE/work/skills/no-mistakes")" \
+    "the pinned root the worker reads should receive the shared skills"
+  assert_absent "$CASE/dispatch-claude/skills" "the per-dispatch store the pin outranks must not receive links"
+  assert_absent "$CASE/ambient-claude/skills" "the ambient store must not receive links"
+  pass "a Claude launch links the shared skills into the store it selected and no other"
+}
+
 test_malformed_pins_refuse_before_launch() {
   local out rc id=acct-bad n=0 body
   new_case malformed claude
@@ -388,6 +447,7 @@ test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
 test_claude_ordinary_pin_unsets_the_config_root
+test_claude_launch_links_shared_skills_into_the_selected_store_only
 test_malformed_pins_refuse_before_launch
 test_pi_pin_selects_the_root_and_the_declared_provider
 test_pi_pin_refusals
