@@ -1446,6 +1446,9 @@ i=$((n - 1))
 case "${plan[$i]}" in
   interrupt)
     printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  restart-then-feedback)
+    cat "$LAVISH_RESTART_FIXTURE"
+    printf 'session:\n  file: /board.html\n  status: feedback\nfeedback[1]{text}:\n  ship it\n'; exit 1 ;;
   near-interrupt)
     printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
   other-server-error)
@@ -1511,24 +1514,80 @@ assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
   "the announced result is the captain's feedback, not the interruption"
 pass "a transient Lavish poll interruption is retried quietly and never announced"
 
+# A server restart's interruption, with its one `help[N]:` trailer line, is the
+# same internal retry: it is never captured, let alone announced.
+HHELP="$TMP_ROOT/hhelp"; new_home "$HHELP"
+HELP_ART="$TMP_ROOT/help-retry-board.html"
+printf '<h1>help retry</h1>\n' > "$HELP_ART"
+lavish_session "$HELP_ART"
+help_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$HELP_ART")
+fm_test_track_procevent_home "$HHELP"
+LAVISH_COUNT="$TMP_ROOT/help-retry-count"; LAVISH_SCRIPT="restart restart feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HHELP" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$HELP_ART" >/dev/null
+wait_for "$HHELP/state/.wake-queue" || fail "feedback after server restarts produced no wake"
+[ "$(cat "$LAVISH_COUNT")" = 3 ] \
+  || fail "the server restart was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
+[ "$(count_results "$HHELP" "$help_id")" = 1 ] \
+  || fail "a retried server restart produced $(count_results "$HHELP" "$help_id") captured results instead of one"
+[ "$(wake_payloads "$HHELP" | sort -u | grep -c .)" = 1 ] \
+  || fail "a retried server restart woke the fleet: $(wake_payloads "$HHELP" | sort -u)"
+assert_grep 'ship it' "$(first_result "$HHELP" "$help_id")" \
+  "the announced result is the captain's feedback, not the server restart"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HHELP" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$HELP_ART" >/dev/null
+pass "a Lavish server restart under a live listener is retried quietly and never captured"
+
+# Retrying that restart shape opens nothing else: a reply that merely opens with
+# it, then carries more, is a genuine result captured byte for byte on its first
+# poll.
+HHELPMORE="$TMP_ROOT/hhelpmore"; new_home "$HHELPMORE"
+HELPMORE_ART="$TMP_ROOT/help-more-board.html"
+printf '<h1>help more</h1>\n' > "$HELPMORE_ART"
+lavish_session "$HELPMORE_ART"
+helpmore_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$HELPMORE_ART")
+fm_test_track_procevent_home "$HHELPMORE"
+LAVISH_COUNT="$TMP_ROOT/help-more-count"; LAVISH_SCRIPT="restart-then-feedback feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HHELPMORE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$HELPMORE_ART" >/dev/null
+wait_for "$HHELPMORE/state/.wake-queue" \
+  || fail "a reply that only opens with the interruption was never announced"
+[ "$(cat "$LAVISH_COUNT")" = 1 ] \
+  || fail "a reply that only opens with the interruption was retried instead of surfacing on its first poll"
+assert_contains "$(wake_payloads "$HHELPMORE")" "procevent lavish $helpmore_id 1" \
+  "a reply that only opens with the interruption is captured and announced"
+HELPMORE_EXPECTED="$TMP_ROOT/help-more-expected"
+{
+  cat "$LAVISH_RESTART_FIXTURE"
+  printf 'session:\n  file: /board.html\n  status: feedback\nfeedback[1]{text}:\n  ship it\n'
+} > "$HELPMORE_EXPECTED"
+cmp -s "$HELPMORE_EXPECTED" "$(first_result "$HHELPMORE" "$helpmore_id")" \
+  || fail "a reply that only opens with the interruption was not captured byte for byte"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HHELPMORE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$HELPMORE_ART" >/dev/null
+pass "a reply that only opens with the restart interruption is still captured on its first poll"
+
 # --- end-user-aligned regression: a Lavish server restart is not news ---------
 # The bearings board woke firstmate with an `unknown` result after every Lavish
 # server restart, although nothing was answered and the session stayed
-# resumable: the help trailer keeps the exact retry above from owning that
-# response, so the listener captured it. The capture is now recorded handled
-# without a wake, the source stays armed, and the captain's next answer on the
-# relaunched listener is announced exactly as before.
+# resumable. The quiet retry above now owns that response too, so only a restart
+# that outlasts the retry bound reaches capture. That capture is recorded
+# handled without a wake, the source stays armed, and the captain's next answer
+# on the relaunched listener is announced exactly as before.
 HRESTART="$TMP_ROOT/hrestart"; new_home "$HRESTART"
 RESTART_ART="$TMP_ROOT/restart-board.html"
 printf '<h1>restart</h1>\n' > "$RESTART_ART"
 lavish_session "$RESTART_ART"
 restart_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RESTART_ART")
 fm_test_track_procevent_home "$HRESTART"
-LAVISH_COUNT="$TMP_ROOT/restart-count"; LAVISH_SCRIPT="restart feedback"
+LAVISH_COUNT="$TMP_ROOT/restart-count"
+LAVISH_SCRIPT="$(printf 'restart %.0s' {1..13})feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRESTART" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$RESTART_ART" >/dev/null
-wait_capture "$HRESTART" "$restart_id" \
+wait_capture "$HRESTART" "$restart_id" 200 \
   || fail "the listener never captured the server restart"
+[ "$(cat "$LAVISH_COUNT")" = 13 ] \
+  || fail "the restart was polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
 cmp -s "$LAVISH_RESTART_FIXTURE" "$HRESTART/state/procevent-inbox/$restart_id.1.result" \
   || fail "the first capture is not the restart response the server returned"
 [ -f "$HRESTART/state/procevent-inbox/$restart_id.1.handled" ] \

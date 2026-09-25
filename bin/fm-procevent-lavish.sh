@@ -71,9 +71,9 @@
 # listener returns exactly three lines: the interruption line, `code:
 # SERVER_ERROR`, and one `help[N]:` trailer line. It carries no session block and
 # no queued item, and the session stays resumable because a re-run poll loses
-# nothing queued. The quiet retry below matches only the bare two-line response,
-# so this shape reaches capture at once, classified `unknown`, after every
-# restart. It is silent and nonterminal: reconcile
+# nothing queued. The quiet retry below owns this shape as well as the bare
+# two-line response, so it reaches capture, classified `unknown`, only when a
+# restart outlasts the retry bound. It is silent and nonterminal: reconcile
 # relaunches the listener, and that next poll announces a session the restart
 # really lost as `missing`. The match covers the whole result but not the
 # trailer's vendor text, so any extra line or other error stays announced. So
@@ -127,14 +127,15 @@
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
-# marks remain available:
+# marks remain available, or with the three-line restart interruption above,
+# which adds one `help[N]:` trailer line:
 #
 #   error: Lavish Editor poll response was interrupted
 #   code: SERVER_ERROR
 #
 # That is an internal retry, not news, so registering the raw poll made the
 # generic runner capture it and wake the whole fleet. `poll` therefore re-runs
-# the published poll up to POLL_RETRY_LIMIT times for that exact response, with
+# the published poll up to POLL_RETRY_LIMIT times for either exact response, with
 # attempt starts at least POLL_RETRY_DELAY_DEFAULT seconds apart. The match is exact and
 # deliberately narrow: real feedback, ended and missing sessions, any other
 # SERVER_ERROR, and the same interruption still standing after the bound is
@@ -323,9 +324,9 @@ POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
-# Exit 0 only for the exact two-line interruption, and nothing else. The whole
-# response must be those two lines with those exact bytes: whitespace variants,
-# a longer response that merely opens with them, and any other SERVER_ERROR are
+# Exit 10 only for either interruption shape in the header, whole, and nothing
+# else, staging at most STAGE_LIMIT bytes to decide: whitespace variants, a
+# longer response that merely opens with either, and any other SERVER_ERROR are
 # genuine errors this adapter must never swallow.
 poll_response_filter() {  # <response-file>
   perl -e '
@@ -333,6 +334,9 @@ poll_response_filter() {  # <response-file>
     use warnings;
     my ($stage) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
+    my $lead = "${expected}help[";
+    my $interrupted = qr/\A\Q$expected\E(?:help\[[0-9]+\]: [^\n]+\n)?\z/;
+    use constant STAGE_LIMIT => 4096;
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
@@ -355,20 +359,23 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $chunk);
         next;
       }
-      my $room = length($expected) + 1 - length($candidate);
+      my $room = STAGE_LIMIT + 1 - length($candidate);
       my $take = length($chunk) < $room ? length($chunk) : $room;
       my $prefix = substr($chunk, 0, $take);
       $candidate .= $prefix;
-      write_all($staged, $prefix);
-      my $matches_prefix = length($candidate) <= length($expected)
-        && substr($expected, 0, length($candidate)) eq $candidate;
+      my $matches_prefix = length($candidate) <= STAGE_LIMIT
+        && (length($candidate) <= length($lead)
+          ? substr($lead, 0, length($candidate)) eq $candidate
+          : substr($candidate, 0, length($lead)) eq $lead);
       if (!$matches_prefix) {
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
+      } else {
+        write_all($staged, $prefix);
       }
     }
-    exit 10 if !$streaming && $candidate eq $expected;
+    exit 10 if !$streaming && $candidate =~ $interrupted;
     write_all(*STDOUT, $candidate) unless $streaming;
   ' "$1"
 }

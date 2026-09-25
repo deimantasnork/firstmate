@@ -1908,11 +1908,11 @@ Before arming any Lavish source, open its artifact with `lavish-axi` so the save
 
 **Retry interrupted Lavish polls**
 
-That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
+That adapter, and only that adapter, retries the exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
-The interruption a server restart returns carries a `help[N]:` trailer, so it is not retried; it is captured and then recorded without a wake under the Lavish silence rules below.
+The interruption a server restart returns adds one `help[N]:` trailer line and is retried the same way; one still standing once the bound is spent is captured and then recorded without a wake under the Lavish silence rules below.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
 
 ### Crew-hosted Lavish review boards
