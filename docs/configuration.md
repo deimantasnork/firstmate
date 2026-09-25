@@ -1912,6 +1912,7 @@ That adapter, and only that adapter, retries the one exact transient response a 
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
+The interruption a server restart returns carries a `help[N]:` trailer, so it is not retried; it is captured and then recorded without a wake under the Lavish silence rules below.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
 
 ### Crew-hosted Lavish review boards
@@ -2020,9 +2021,10 @@ Whether a captured result is a routine no-op is adapter knowledge too, and the r
 
 **Lavish silence rules**
 
-- For Lavish that verdict covers two shapes - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said, and `browser_disconnected` (classified `disconnected`), which carries no answer while the session remains open.
+- For Lavish that verdict covers three shapes - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said; `browser_disconnected` (classified `disconnected`), which carries no answer while the session remains open; and the poll interruption a Lavish server restart returns under a live listener, which is exactly the interruption line, `code: SERVER_ERROR`, and one `help[N]:` trailer line.
+- The restart interruption stays nonterminal, so reconcile relaunches the listener and that next poll announces a session the restart really lost as `missing`.
 - Any recognized top-level `prompts` or `feedback` block counts as content regardless of its declared count, and a malformed header makes the result indeterminate rather than empty.
-- A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, `unknown`, or unreadable result.
+- A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, other `unknown`, or unreadable result.
 
 **Retire terminal sources**
 

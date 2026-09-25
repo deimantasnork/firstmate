@@ -1404,13 +1404,26 @@ pass "a board close carrying the captain's real answer is still announced"
 # over what is really an internal retry. Every scenario below runs through the
 # adapter's own arm command and the real runner, so registration, capture, and
 # publication are exercised for real.
+#
+# A server restart under a live listener returns the same interruption plus one
+# help trailer line. These are the exact bytes a real bearings board listener
+# captured one second after its Lavish server logged a shutdown-request.
+LAVISH_RESTART_FIXTURE="$TMP_ROOT/lavish-restart-response"
+# shellcheck disable=SC2016 # the backticks are Lavish's literal help bytes.
+printf '%s\n' \
+  'error: Lavish Editor poll response was interrupted' \
+  'code: SERVER_ERROR' \
+  'help[2]: Run `lavish-axi server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics,Re-run the last `lavish-axi poll <html-file>` command after the server is healthy' \
+  > "$LAVISH_RESTART_FIXTURE"
+export LAVISH_RESTART_FIXTURE
 LAVISH_SCRIPTED_BIN=$(fm_fakebin "$TMP_ROOT/lavish-scripted-stub")
 cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 # Stand-in for `lavish-axi poll <file>`, scripted per scenario: LAVISH_SCRIPT
 # names the response for each successive poll, one word per poll, and its last
 # word repeats forever. `interrupt` is the exact transient response the server
-# returns while the board's marks stay available.
+# returns while the board's marks stay available, and `restart` is the response
+# a server restart returns under a live listener.
 [ "${1-}" != --version ] || { printf '0.1.79\n'; exit 0; }
 n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
@@ -1437,6 +1450,8 @@ case "${plan[$i]}" in
     printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
   other-server-error)
     printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
+  restart)
+    cat "$LAVISH_RESTART_FIXTURE"; exit 1 ;;
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
   stream)
@@ -1495,6 +1510,47 @@ assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
 assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
   "the announced result is the captain's feedback, not the interruption"
 pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# --- end-user-aligned regression: a Lavish server restart is not news ---------
+# The bearings board woke firstmate with an `unknown` result after every Lavish
+# server restart, although nothing was answered and the session stayed
+# resumable: the help trailer keeps the exact retry above from owning that
+# response, so the listener captured it. The capture is now recorded handled
+# without a wake, the source stays armed, and the captain's next answer on the
+# relaunched listener is announced exactly as before.
+HRESTART="$TMP_ROOT/hrestart"; new_home "$HRESTART"
+RESTART_ART="$TMP_ROOT/restart-board.html"
+printf '<h1>restart</h1>\n' > "$RESTART_ART"
+lavish_session "$RESTART_ART"
+restart_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RESTART_ART")
+fm_test_track_procevent_home "$HRESTART"
+LAVISH_COUNT="$TMP_ROOT/restart-count"; LAVISH_SCRIPT="restart feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRESTART" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RESTART_ART" >/dev/null
+wait_capture "$HRESTART" "$restart_id" \
+  || fail "the listener never captured the server restart"
+cmp -s "$LAVISH_RESTART_FIXTURE" "$HRESTART/state/procevent-inbox/$restart_id.1.result" \
+  || fail "the first capture is not the restart response the server returned"
+[ -f "$HRESTART/state/procevent-inbox/$restart_id.1.handled" ] \
+  || fail "a server restart capture was not recorded handled, so a later reconcile would announce it"
+[ -z "$(wake_payloads "$HRESTART")" ] \
+  || fail "a Lavish server restart woke firstmate: $(wake_payloads "$HRESTART")"
+[ -f "$HRESTART/state/procevent/$restart_id.source" ] \
+  || fail "a server restart retired a board whose session stays resumable"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRESTART" reconcile >/dev/null
+wait_for "$HRESTART/state/.wake-queue" \
+  || fail "the relaunched listener's answered round produced no wake"
+[ "$(count_results "$HRESTART" "$restart_id")" = 2 ] \
+  || fail "a restart then an answer captured $(count_results "$HRESTART" "$restart_id") results instead of two"
+[ "$(wake_payloads "$HRESTART" | sort -u | grep -c .)" = 1 ] \
+  || fail "a restart then an answer did not produce exactly one wake: $(wake_payloads "$HRESTART" | sort -u)"
+assert_contains "$(wake_payloads "$HRESTART")" "procevent lavish $restart_id 2" \
+  "the answer delivered after a server restart is announced unchanged"
+assert_grep 'ship it' "$HRESTART/state/procevent-inbox/$restart_id.2.result" \
+  "the announced result is the captain's answer, not the restart"
+[ ! -f "$HRESTART/state/procevent-inbox/$restart_id.2.handled" ] \
+  || fail "the answer delivered after a server restart was recorded handled without ever being handled"
+pass "a Lavish server restart is recorded without a wake while the next answer is still announced"
 
 # --- end-user-aligned regression: a retried poll does not resubmit the reply ---
 # The worker hands its round reply to the adapter once. When the first poll of
@@ -3054,6 +3110,9 @@ printf 'session:\n  file: /a.html\n  status: waiting\n' > "$TRM"
 printf 'session:\n  file: /a.html\n  status: browser_disconnected\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
   && fail "a browser-disconnected session was reported terminal"
+cp "$LAVISH_RESTART_FIXTURE" "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  && fail "a server restart interruption was reported terminal"
 printf 'garbage that is not a session block\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" && fail "an unreadable result was reported terminal"
 printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  session_ended: true\n' > "$TRM"
@@ -3091,7 +3150,15 @@ silent_says yes "a browser disconnect carries no answer and keeps the session op
 printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$SIL"
 silent_says no "a missing session is not a no-op"
 printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$SIL"
-silent_says no "a server error is not a no-op"
+silent_says no "the bare interruption left once the bounded retry is spent is not a no-op"
+cp "$LAVISH_RESTART_FIXTURE" "$SIL"
+silent_says yes "a server restart under a live listener carries no answer and keeps the session open"
+{ cat "$LAVISH_RESTART_FIXTURE"; printf 'prompts[1]{tag,text}:\n  "message","typed before the restart"\n'; } > "$SIL"
+silent_says no "a restart interruption followed by anything more is never assumed empty"
+printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\nhelp[1]: Inspect the server log\n' > "$SIL"
+silent_says no "another server error carrying a help trailer is not a restart"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\nnext_step: reopen the board\n' > "$SIL"
+silent_says no "an interruption whose last line is not a help trailer is not a restart"
 printf 'garbage that is not a session block\n' > "$SIL"
 silent_says no "an unreadable result fails closed and is announced"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nfeedback[1]{text}:\n  prompts[0]{x}:\n' > "$SIL"

@@ -61,19 +61,33 @@
 # Closing a review surface that carried nothing is the single most common Lavish
 # result: the captain reads a board, says nothing, and closes it. Announcing that
 # put a wake in front of the handler whose entire content was that nothing
-# happened. `silent` therefore holds two narrow, positively-determined shapes -
+# happened. `silent` therefore holds three narrow, positively-determined shapes -
 # a session this adapter classifies `ended` that carries no queued content block
-# at all, or `browser_disconnected`, which carries no answer while the session
-# remains open - and every other result stays announced.
+# at all, `browser_disconnected`, which carries no answer while the session
+# remains open, and the restart interruption below - and every other result
+# stays announced.
+#
+# A LAVISH SERVER RESTART IS NOT NEWS EITHER. A server restart under a live
+# listener returns exactly three lines: the interruption line, `code:
+# SERVER_ERROR`, and one `help[N]:` trailer line. It carries no session block and
+# no queued item, and the session stays resumable because a re-run poll loses
+# nothing queued. The quiet retry below matches only the bare two-line response,
+# so this shape reaches capture at once, classified `unknown`, after every
+# restart. It is silent and nonterminal: reconcile
+# relaunches the listener, and that next poll announces a session the restart
+# really lost as `missing`. The match covers the whole result but not the
+# trailer's vendor text, so any extra line or other error stays announced. So
+# does the bare two-line response, which reaches capture only after the bounded
+# retry spent itself on a persistent interruption.
 #
 # Deliberately narrow, in both directions. A `Send & End` close carrying the
 # captain's actual answer arrives as `status: feedback` with `session_ended`, so
 # it classifies `feedback`, never `ended`, and is announced exactly as before; so
 # is any `ended` result that still carries a `prompts` or `feedback` block, which
 # the published poll is not expected to produce but which must never be dropped
-# on that expectation. A `waiting` session, a `missing` one, an `unknown` or
-# unreadable result, and any error all stay announced, because none of them
-# positively proves nothing was said. Silence is only ever an absence this
+# on that expectation. A `waiting` session, a `missing` one, any other `unknown`
+# or unreadable result, and any other error all stay announced, because none of
+# them positively proves nothing was said. Silence is only ever an absence this
 # adapter can see in the result, never an absence it assumes.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
@@ -551,17 +565,34 @@ result_has_queued_content() {  # <result-file>
   ' "$1"
 }
 
+# Whether a captured result is exactly the restart interruption described in the
+# header, and nothing else. Only the trailer's shape is matched, never its text.
+# 0 = that exact shape, anything else = announce, including a read that failed.
+result_is_restart_interruption() {  # <result-file>
+  perl -e '
+    use strict;
+    use warnings;
+    open my $fh, "<", $ARGV[0] or exit 2;
+    local $/;
+    my $body = <$fh>;
+    defined $body or exit 2;
+    exit($body =~ /\Aerror: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\nhelp\[[0-9]+\]: [^\n]+\n\z/ ? 0 : 1);
+  ' "$1"
+}
+
 # Whether a captured result is a routine no-op the runner should record without
 # announcing, for the generic runner's silence seam. Lavish's notion of "nothing
 # was said" lives here and nowhere else: an ended session carrying no queued
 # content block is a board the captain closed without saying anything, and the
-# handler learns nothing from being told. Anything else - a real answer, a
+# handler learns nothing from being told; a browser disconnect and a server
+# restart interruption carry nothing either. Anything else - a real answer, a
 # missing or waiting session, an unreadable result - is announced.
 cmd_silent() {
   local file=${1-} content_rc
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   [ "$(cmd_classify "$file")" = disconnected ] && return 0
+  result_is_restart_interruption "$file" && return 0
   [ "$(cmd_classify "$file")" = ended ] || return 1
   result_has_queued_content "$file"
   content_rc=$?
