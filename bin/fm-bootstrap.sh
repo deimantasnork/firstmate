@@ -399,6 +399,7 @@ secondmate_sync() {
     done
     return 0
   fi
+  # shellcheck disable=SC2034 # Caller-side accumulator reset; read and appended by the sourced fm-ff-lib.sh.
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
   SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
