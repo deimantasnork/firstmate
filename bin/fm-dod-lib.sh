@@ -65,7 +65,9 @@
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
+# `## Firstmate spec` and never the worker's own tradeoffs. The one exception
+# is the `Fixes #<number>` closing line an issue-linked brief names
+# (bin/fm-brief.sh --issue), which ends `--intent` so it reaches the PR body.
 # Author the subsection body and later relays as the actual words, without
 # adding speaker labels or direct address: the heading supplies provenance and
 # is not part of --intent. A legacy mixed Task instead marks each captain line

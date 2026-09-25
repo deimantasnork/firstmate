@@ -1277,6 +1277,80 @@ test_branch_prefix_command_is_shell_safe() {
 
 test_worker_role_scope
 
+# A merged PR closes its GitHub issue only when the PR body carries a closing
+# line, so an issue-linked ship brief must name that exact line and where it
+# goes for each PR-opening mode. A brief with no issue must render exactly the
+# scaffold it did before, so the issue brief differs from it by one added line.
+test_issue_closing_line_names_where_it_goes() {
+  local home plain mode issue_arg id brief plain_brief changed added
+  home="$TMP_ROOT/issue-closing-home"
+  plain="$TMP_ROOT/issue-closing-plain-home"
+  mkdir -p "$home/data" "$plain/data"
+
+  for mode in no-mistakes direct-PR; do
+    id="brief-issue-$mode"
+    issue_arg="--issue 181"
+    [ "$mode" = direct-PR ] && issue_arg="--issue=181"
+    # shellcheck disable=SC2086  # issue_arg is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" $issue_arg >/dev/null 2>&1 \
+      || fail "$mode: fm-brief.sh $issue_arg exited non-zero"
+    FM_HOME="$plain" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: fm-brief.sh without --issue exited non-zero"
+    brief="$home/data/$id/brief.md"
+    plain_brief="$plain/data/$id/brief.md"
+
+    assert_no_grep "Fixes #" "$plain_brief" "$mode: a brief with no issue carried closing-keyword text"
+    assert_no_grep "closes GitHub issue" "$plain_brief" "$mode: a brief with no issue named an issue to close"
+
+    changed=$(diff <(sed "s|$plain|HOME|g" "$plain_brief") <(sed "s|$home|HOME|g" "$brief") | grep '^[<>]')
+    added=$(printf '%s\n' "$changed" | sed -n 's/^> //p')
+    [ "$(printf '%s\n' "$changed" | wc -l | tr -d ' ')" = 1 ] && [ -n "$added" ] \
+      || fail "$mode: --issue must add exactly one line to the scaffold (got: $changed)"
+    assert_contains "$added" 'This PR closes GitHub issue #181: ' "$mode: closing line did not name the issue"
+    awk '/^# Definition of done$/,0' "$brief" | grep -qF "$added" \
+      || fail "$mode: the closing-line instruction is not part of the Definition of done"
+    case "$mode" in
+      no-mistakes)
+        # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+        assert_contains "$added" 'end `--intent` with the line `Fixes #181` on its own line' \
+          "no-mistakes: closing line did not say --intent carries it"
+        # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+        assert_contains "$added" 'copies `--intent` verbatim into the PR body' \
+          "no-mistakes: closing line did not say how --intent reaches the PR body" ;;
+      direct-PR)
+        # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+        assert_contains "$added" 'put the line `Fixes #181` on its own line in the PR body' \
+          "direct-PR: closing line did not say the PR body carries it" ;;
+    esac
+  done
+  pass "fm-brief.sh: --issue adds one closing-line instruction per PR mode, and no issue leaves the scaffold unchanged"
+}
+
+# A closing line only works in a GitHub pull request body, so --issue must be
+# refused where no such body exists or the value is not an issue number.
+test_issue_is_refused_where_no_pr_body_exists() {
+  local home out status label args expect
+  home="$TMP_ROOT/issue-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+    assert_absent "$home/data/${args%% *}/brief.md" "$label: refused scaffold still wrote a brief"
+  done <<'ROWS'
+issue on local-only|brief-issue-r1 some-proj --mode local-only --issue 181|--issue applies only to a no-mistakes or direct-PR ship brief
+issue on gerrit|brief-issue-r2 some-proj --mode direct-PR --forge gerrit --issue 181|--issue applies only to a no-mistakes or direct-PR ship brief
+issue on a scout brief|brief-issue-r3 some-proj --scout --issue 181|--issue applies only to a no-mistakes or direct-PR ship brief
+issue on a secondmate charter|brief-issue-r4 --secondmate --no-projects --issue 181|--issue applies only to a no-mistakes or direct-PR ship brief
+non-numeric issue|brief-issue-r5 some-proj --mode direct-PR --issue abc|--issue must be a GitHub issue number
+zero issue|brief-issue-r6 some-proj --mode no-mistakes --issue 0|--issue must be a GitHub issue number
+ROWS
+  pass "fm-brief.sh: --issue is refused without a GitHub PR body or a real issue number"
+}
+
 # Rule 2 governs file edits rather than pool administration, so every crewmate
 # scaffold must prohibit the administrative act itself. The rule is emitted from
 # one shared string so the ship and scout copies cannot drift apart.
@@ -1376,4 +1450,6 @@ test_ship_branch_prefix_empty_override_yields_bare_task_id
 test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
+test_issue_closing_line_names_where_it_goes
+test_issue_is_refused_where_no_pr_body_exists
 test_crewmate_scaffolds_forbid_pool_administration

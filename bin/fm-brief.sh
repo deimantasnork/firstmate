@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--issue <number>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -59,6 +59,15 @@
 # standing per-project preference, and firstmate resolves it per task at intake
 # and passes the explicit flag. Refused on --scout and --secondmate: a scout
 # makes no branch and a charter is not a delivery contract.
+# --issue <number> names the GitHub issue a no-mistakes or direct-PR ship task
+# closes, and ends the Definition of done with one line naming the exact closing
+# line, `Fixes #<number>`, and where it goes, because a merged PR whose body
+# lacks it leaves the issue open: a direct-PR worker puts it in the PR body it
+# opens, and a no-mistakes worker ends `--intent` with it, since no-mistakes
+# copies `--intent` verbatim into the PR body. Omitted, the scaffold is
+# unchanged. Firstmate passes it at intake; this script never infers one from
+# the task text, which is filled after scaffolding. Refused on local-only,
+# forge=gerrit, scout, and secondmate scaffolds, which open no GitHub PR.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
@@ -191,6 +200,8 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+ISSUE=
+ISSUE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -203,6 +214,7 @@ for a in "$@"; do
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      issue) ISSUE=$a; ISSUE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -221,6 +233,8 @@ for a in "$@"; do
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE=${a#--issue=}; ISSUE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -279,6 +293,16 @@ if [ "$KIND" = ship ]; then
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+# A closing line only works in the body of a GitHub pull request.
+if [ "$ISSUE_SET" -eq 1 ]; then
+  case "$KIND:$MODE:$FORGE" in
+    ship:no-mistakes:none|ship:direct-PR:none) ;;
+    *) echo "error: --issue applies only to a no-mistakes or direct-PR ship brief without a forge; local-only, gerrit, scout, and secondmate scaffolds open no GitHub PR whose body could close the issue" >&2; exit 1 ;;
+  esac
+  case "$ISSUE" in
+    ''|0*|*[!0-9]*) echo "error: --issue must be a GitHub issue number such as 181 (got '$ISSUE')" >&2; exit 1 ;;
+  esac
 fi
 ID=${POS[0]}
 BRANCH="$BRANCH_PREFIX$ID"
@@ -607,6 +631,15 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+ISSUE_LINE=
+case "$ISSUE_SET:$MODE" in
+  1:direct-PR)
+    ISSUE_LINE="
+This PR closes GitHub issue #$ISSUE: put the line \`Fixes #$ISSUE\` on its own line in the PR body, because that line is what makes the merge close the issue." ;;
+  1:no-mistakes)
+    ISSUE_LINE="
+This PR closes GitHub issue #$ISSUE: end \`--intent\` with the line \`Fixes #$ISSUE\` on its own line, the one addition to the captain's words it may carry, because no-mistakes copies \`--intent\` verbatim into the PR body and that line is what makes the merge close the issue." ;;
+esac
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -656,7 +689,7 @@ $INBOX_SECTION
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
-$DOD
+$DOD$ISSUE_LINE
 EOF
 append_brief_include
 if [ "$FORGE" = none ]; then
