@@ -871,7 +871,7 @@ test_claude_spawn_pretrusts_a_pooled_worktree_from_a_sibling_clone() {
 # worker from the home's own secondmate record in its parent home, never from
 # the spawning process's environment, which is left empty here.
 test_secondmate_worker_pretrusts_the_slot_in_its_inherited_store() {
-  local shape task_home proj id launch_log out fakebin
+  local shape task_home proj id launch_log out fakebin launch doorbell record
   for shape in same sibling; do
     make_pool_case "secondmate-slot-$shape"
     task_home="$POOL_CASE/home"
@@ -905,8 +905,14 @@ JSON
     [ ! -e "$task_home/user-home/.claude.json" ] || fail "trust was written into the default store"
     assert_grep "CLAUDE_CONFIG_DIR='$POOL_CONFIG'" "$launch_log" \
       "the worker launch did not carry the store containing the slot's trust entry"
-    assert_grep "$task_home/data/$id/launch-brief.md" "$launch_log" \
-      "the worker launch did not carry its brief"
+    launch=$(cat "$launch_log")
+    doorbell=$(claude_launch_doorbell "$launch")
+    record=$(printf '%s' "$doorbell" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
+    [ -n "$record" ] || fail "the worker launch did not carry a brief doorbell"
+    [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$task_home/state" "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+      || fail "the worker launch's doorbell did not name a brief record in the receiving home"
+    [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$task_home/state" "$ROOT/bin/fm-operational-input.sh" open "$record")" = "$(cat "$task_home/data/$id/launch-brief.md")" ] \
+      || fail "the worker could not read its launch brief from the record"
     assert_grep "worktree=$POOL_WT" "$task_home/state/$id.meta" \
       "the registered slot differed from the worker's recorded worktree"
   done
