@@ -1487,7 +1487,7 @@ test_relaunch_repairs_an_owned_group_writable_temp_root() {
   [ "$(journal_field "$dir" "$id" staging)" = repaired ] \
     || fail "the checkpoint should record the repair, got '$(journal_field "$dir" "$id" staging)'"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
-  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: an owned group-writable temp root is made private and the relaunch proceeds"
 }
 
