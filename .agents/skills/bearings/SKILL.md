@@ -94,7 +94,9 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 ## Lavish board mode
 
 `/bearings lavish` adds one deliverable beside the unchanged chat digest: the interactive fleet board, a myfirstmate-styled Lavish page where the captain answers Captain's Call items directly instead of replying in chat.
-`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, template injection, live Lavish session verification and ended-session reopening, the any-origin answer binding, and listener registration - so the per-invocation work is composing the payload and running its `build`.
+`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, the store-first merge of the durable decision cards, template injection, live Lavish session verification and ended-session reopening, the any-origin answer binding, and listener registration - so the per-invocation work is composing the payload and running its `build`.
+Its `refresh` subcommand is the deterministic path beside that composition: it composes the fleet rows and one fallback card per open call from the same snapshot and builds, so a raised call or a changed live stage reaches the board with no agent turn, which is the shape a scheduled pass runs. Use it when the board only needs to be current; use the composition below when it needs the ranking judgment, the card copy, or the dispatch picker.
+A decision card written where the call was raised is authoritative for its key: `build` merges the durable store first, so read `state/decision-cards/<task>.json` before composing a card and rewrite copy through `bin/fm-captain-hold.sh card <task-id>` rather than re-authoring it in the payload.
 
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
