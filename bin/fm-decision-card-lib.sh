@@ -18,7 +18,7 @@
 # the durable store, whose records are the EFFECTIVE cards and therefore carry
 # that injected choice exactly once.
 
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034,SC2016
 FM_DECISION_CARD_JQ_DEFS='
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
