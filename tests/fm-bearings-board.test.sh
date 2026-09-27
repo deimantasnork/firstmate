@@ -184,7 +184,8 @@ EOF
 
 # Extract the injected payload back out of a built board page.
 write_snapshot_stub() {  # <home>; a canonical-snapshot shape for the refresh tests
-  local home=$1 stub="$home/fakebin/snapshot-stub"
+  local home=$1
+  local stub="$home/fakebin/snapshot-stub"
   cat > "$stub" <<'SH'
 #!/usr/bin/env bash
 cat <<'JSON'
