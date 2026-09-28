@@ -162,7 +162,7 @@ board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 # card per open call, and the durable store merged in by build. Nothing here
 # reads prose to classify anything, and nothing here invents ranking judgment.
 compose_payload() {  # <dest.json>
-  local dest=$1 snapshot tmp file key fp_rc extra='[]' card=''
+  local dest=$1 snapshot tmp file key extra='[]' card='' stored='' reasons=''
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -x "$SNAPSHOT_BIN" ] || fail "the bearings snapshot is missing: $SNAPSHOT_BIN"
   snapshot=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-snapshot.XXXXXX") \
@@ -199,7 +199,7 @@ compose_payload() {  # <dest.json>
         underway: [
           $s.in_flight[]?
           | {id: .id, state: .state, doing: (.doing // "-"), kind: .kind,
-             name: .name, repo: home_repo}
+             name: .name, repo: (.repo // home_repo)}
         ],
         landed: [
           $s.landed[]?
@@ -221,26 +221,41 @@ compose_payload() {  # <dest.json>
     fail "cannot compose the board payload from the snapshot"
   fi
   rm -f -- "$snapshot"
-  # The durable store is a SOURCE, not just a sink: a call the snapshot does not
-  # list under decisions_open - a reconciling, blocked, dated, or merge-card
-  # call - still carries a stored record, and a refresh must never drop it. Every
-  # record whose task is still an open captain call is appended when the payload
-  # does not already carry its key; build then merges it first. The injected
-  # reconcile choice is stripped before appending because the authored contract
-  # reserves it and build injects exactly one itself.
+  # The durable store is a SOURCE for a card the composed payload cannot author
+  # itself: an agent-authored `merge.<task>` card for a call the snapshot still
+  # lists as live. A stored card for a blocked, dated, reconciling, or aged hold
+  # must stay out of Captain's Call - those holds belong to the disclosed
+  # Charted Next gates, and the durable record remains in the store until the
+  # call is live again. Every merged record is re-validated in its stored form; a
+  # malformed one is named on stderr and skipped rather than failing the whole
+  # refresh. The injected reconcile choice is stripped before appending because
+  # the authored contract reserves it and build injects exactly one itself.
   if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
     for file in "$DECISION_CARDS_DIR"/*.json; do
       [ -f "$file" ] && [ ! -L "$file" ] || continue
       key=$(basename "$file" .json)
+      case "$key" in merge.*) ;; *) continue ;; esac
       jq -e --arg key "$key" '[.captains_call[]?.key] | index($key) != null' "$tmp" >/dev/null 2>&1 && continue
-      fp_rc=0
-      "$SCRIPT_DIR/fm-captain-hold.sh" open "${key#merge.}" --distinguish-absent >/dev/null 2>&1 || fp_rc=$?
-      [ "$fp_rc" -eq 0 ] || continue
-      card=$(jq -n -c --arg key "$key" --slurpfile rec "$file" '
-        $rec[0].card
-        | .options = [(.options // [])[] | select(.value != "reconcile")]
-        | select(.key == $key)') || card=''
-      [ -n "$card" ] || continue
+      jq -e --arg task "${key#merge.}" '[.captains_call[]?.key] | index($task) != null' "$tmp" >/dev/null 2>&1 || continue
+      card=$(jq -c '.card? // empty' "$file" 2>/dev/null) || card=''
+      reasons=''
+      if [ -n "$card" ]; then
+        reasons=$(printf '%s' "$card" | jq -r "$FM_DECISION_CARD_JQ_DEFS"'
+          if stored_call_item then "" else (call_reasons | join("; ")) end' 2>/dev/null) \
+          || reasons='unreadable record'
+      else
+        reasons='unreadable record'
+      fi
+      if [ -n "$reasons" ]; then
+        printf 'ignored-store-card: %s (%s)\n' "$key" "$reasons" >&2
+        continue
+      fi
+      if [ "$(jq -r '.card.key? // empty' "$file" 2>/dev/null)" != "$key" ]; then
+        printf 'ignored-store-card: %s (record key does not match its file name)\n' "$key" >&2
+        continue
+      fi
+      card=$(printf '%s' "$card" | jq -c '
+        .options = [(.options // [])[] | select(.value != "reconcile")]') || continue
       extra=$(printf '%s' "$extra" | jq -c --argjson card "$card" '. + [$card]') || continue
     done
   fi

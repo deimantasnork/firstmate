@@ -384,8 +384,12 @@ first_pr_url_in_file() {  # <file>
 # Pending captain-hold reconcile requests (state/reconcile-requests/*.request) as
 # a task-id -> requested-timestamp map. A call the captain sent back for a
 # re-check is no longer waiting on the captain, so the classification below
-# buckets it apart from the live Captain's Call. Unreadable or unsafe records
-# are ignored: they can neither create nor hide a call.
+# buckets it apart from the live Captain's Call. The file name IS the request's
+# task, exactly as bin/fm-captain-hold.sh reads it, and the record must carry
+# that script's schema and its own task field; an unreadable, incompatible, or
+# misplaced record is ignored, because it can neither create nor hide a call.
+RECONCILE_REQUEST_SCHEMA=fm-reconcile-request.v1
+
 reconcile_requests_json() {
   local dir="$STATE/reconcile-requests" file task requested
   if [ ! -d "$dir" ] || [ -L "$dir" ]; then
@@ -395,11 +399,12 @@ reconcile_requests_json() {
   {
     for file in "$dir"/*.request; do
       [ -f "$file" ] && [ ! -L "$file" ] || continue
-      task=$(sed -n 's/^task=//p' "$file" | head -1)
-      [ -n "$task" ] || continue
+      task=$(basename "$file" .request)
       case "$task" in
-        *[!A-Za-z0-9._-]*) continue ;;
+        ''|*[!A-Za-z0-9._-]*) continue ;;
       esac
+      [ "$(sed -n 's/^schema=//p' "$file" | head -1)" = "$RECONCILE_REQUEST_SCHEMA" ] || continue
+      [ "$(sed -n 's/^task=//p' "$file" | head -1)" = "$task" ] || continue
       requested=$(sed -n 's/^requested=//p' "$file" | head -1)
       printf '%s\t%s\n' "$task" "$requested"
     done
