@@ -1128,12 +1128,14 @@ command_card() {  # <task-id> <card flags>
   validate_slug task-id "$id"
   [ "$CARD_USED" -eq 1 ] || fail "card needs --card-file or the card flags"
   stage_authored_card "$id" "" "$(card_repo_for "$id" '')"
+  # The open check runs under the same task lock answer takes, so a call closed
+  # while this command waited cannot receive a card afterwards.
+  acquire_task_control_lock "$id"
   if ! command_open "$id" --distinguish-absent >/dev/null 2>&1; then
     rm -f -- "$DECISION_CARD_TMP"
     DECISION_CARD_TMP=
     fail "task $id is not an open captain call; a card belongs to a live hold"
   fi
-  acquire_task_control_lock "$id"
   write_decision_card "$DECISION_CARD_TMP"
   card=$DECISION_CARD_TMP
   rm -f -- "$card"

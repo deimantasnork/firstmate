@@ -4107,6 +4107,31 @@ test_card_rewrites_an_open_call_and_a_rehold_preserves_it() {
   pass "card rewrites an open call and a re-hold preserves the stored copy"
 }
 
+# A card belongs to a live call: once the call is answered, `card` refuses and
+# the stored record the captain was shown stays untouched.
+test_card_refuses_a_closed_call() {
+  local home store out rc
+  home=$(make_home card-closed)
+  store="$home/state/decision-cards/sample-closed-card.json"
+  run_captain "$home" hold sample-closed-card --title "Decide the closed route" \
+    --reason "captain closed-route choice" --repo sample --card-title "Shown copy" \
+    --option "a:Option A" >/dev/null || fail "hold with a card failed"
+  printf 'Go with A.\n' > "$home/go.txt"
+  run_captain "$home" answer sample-closed-card --decision-file "$home/go.txt" >/dev/null \
+    || fail "answer failed on the card fixture"
+  set +e
+  out=$(run_captain "$home" card sample-closed-card --card-title "Late copy" \
+    --option "b:Option B" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "card accepted a call that is no longer open"
+  assert_contains "$out" "not an open captain call" \
+    "the closed-call refusal did not name the reason: $out"
+  jq -e '.card.title == "Shown copy"' "$store" >/dev/null \
+    || fail "the refused card overwrote the stored record"
+  pass "card refuses a closed call and leaves the stored record untouched"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
@@ -4163,3 +4188,4 @@ test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
 test_hold_writes_a_raise_time_decision_card
 test_hold_refuses_an_invalid_card_before_any_mutation
 test_card_rewrites_an_open_call_and_a_rehold_preserves_it
+test_card_refuses_a_closed_call
