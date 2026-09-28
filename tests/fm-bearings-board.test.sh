@@ -903,9 +903,64 @@ test_refresh_composes_from_the_snapshot_and_merges_the_store_card() {
     and ([.landed[].id] == ["sample-landed-task"])
     and ([.charted[].id] == ["sample-gate", "sample-inventory"])
     and ((.charted[] | select(.id == "sample-inventory") | .kind) == "warning")
+    and ((.underway[] | select(.id == "sample-live-task") | .repo) == "sample")
     and ([.charted[] | select(.dispatchable != false)] | length == 0)' "$home/served.json" >/dev/null \
     || fail "the refreshed board did not carry the snapshot rows and the stored card copy"
   pass "refresh composes the snapshot rows and merges the stored decision card"
+}
+
+# A stored record the shared contract rejects is named and skipped, not merged
+# into the payload where the validator would fail the whole refresh.
+test_refresh_ignores_a_malformed_store_card() {
+  local home stub out rc
+  home=$(make_home refresh-malformed-store)
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  mkdir -p "$home/state/decision-cards"
+  jq -n --arg key "merge.sample-open-call" '{
+    schema:"fm-decision-card.v1", generated:"2026-08-18T00:00:00Z",
+    card:{key:$key, type:"merge", repo:"sample", title:"", risk:"low", options:[]}
+  }' > "$home/state/decision-cards/merge.sample-open-call.json"
+  set +e
+  out=$(FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a malformed stored card failed the whole refresh: $out"
+  assert_contains "$out" "ignored-store-card: merge.sample-open-call" \
+    "the malformed stored card was not named and skipped: $out"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e '([.captains_call[].key] | index("merge.sample-open-call")) == null' "$home/served.json" >/dev/null \
+    || fail "the malformed stored card still reached the board payload"
+  pass "refresh skips a malformed stored card and keeps the board current"
+}
+
+# A stored card for a hold the snapshot does not list as live - blocked, dated,
+# reconciling, or aged - stays in the durable store and out of Captain's Call,
+# where the call belongs to a disclosed Charted Next gate instead.
+test_refresh_keeps_a_deferred_hold_out_of_captains_call() {
+  local home stub key
+  home=$(make_home refresh-deferred-card)
+  key=sample-deferred-call
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-deferred-call - Decide the deferred sample (repo: sample) (kind: captain) (hold: pick a route) (hold-kind: captain)
+
+## Done
+EOF
+  stash_store_card "$home" "merge.$key"
+  FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh >/dev/null \
+    || fail "refresh failed with a deferred hold's stored card present"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e '[.captains_call[].key] | index("merge.sample-deferred-call") == null' "$home/served.json" >/dev/null \
+    || fail "a refresh resurrected a deferred hold as a live decision card"
+  assert_present "$home/state/decision-cards/merge.$key.json" \
+    "the deferred hold lost its durable card record"
+  pass "refresh keeps a deferred hold's card out of Captain's Call"
 }
 
 test_refresh_refuses_a_broken_snapshot_before_touching_the_board() {
@@ -947,4 +1002,6 @@ test_build_refuses_a_nondecision_reconcile_value
 test_build_merges_the_durable_card_store_first
 test_build_ignores_a_malformed_store_card_without_failing
 test_refresh_composes_from_the_snapshot_and_merges_the_store_card
+test_refresh_ignores_a_malformed_store_card
+test_refresh_keeps_a_deferred_hold_out_of_captains_call
 test_refresh_refuses_a_broken_snapshot_before_touching_the_board
