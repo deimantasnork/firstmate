@@ -162,7 +162,7 @@ board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 # card per open call, and the durable store merged in by build. Nothing here
 # reads prose to classify anything, and nothing here invents ranking judgment.
 compose_payload() {  # <dest.json>
-  local dest=$1 snapshot tmp
+  local dest=$1 snapshot tmp file key fp_rc extra='[]' card=''
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -x "$SNAPSHOT_BIN" ] || fail "the bearings snapshot is missing: $SNAPSHOT_BIN"
   snapshot=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-snapshot.XXXXXX") \
@@ -221,6 +221,36 @@ compose_payload() {  # <dest.json>
     fail "cannot compose the board payload from the snapshot"
   fi
   rm -f -- "$snapshot"
+  # The durable store is a SOURCE, not just a sink: a call the snapshot does not
+  # list under decisions_open - a reconciling, blocked, dated, or merge-card
+  # call - still carries a stored record, and a refresh must never drop it. Every
+  # record whose task is still an open captain call is appended when the payload
+  # does not already carry its key; build then merges it first. The injected
+  # reconcile choice is stripped before appending because the authored contract
+  # reserves it and build injects exactly one itself.
+  if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
+    for file in "$DECISION_CARDS_DIR"/*.json; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      key=$(basename "$file" .json)
+      jq -e --arg key "$key" '[.captains_call[]?.key] | index($key) != null' "$tmp" >/dev/null 2>&1 && continue
+      fp_rc=0
+      "$SCRIPT_DIR/fm-captain-hold.sh" open "${key#merge.}" --distinguish-absent >/dev/null 2>&1 || fp_rc=$?
+      [ "$fp_rc" -eq 0 ] || continue
+      card=$(jq -n -c --arg key "$key" --slurpfile rec "$file" '
+        $rec[0].card
+        | .options = [(.options // [])[] | select(.value != "reconcile")]
+        | select(.key == $key)') || card=''
+      [ -n "$card" ] || continue
+      extra=$(printf '%s' "$extra" | jq -c --argjson card "$card" '. + [$card]') || continue
+    done
+  fi
+  if [ "$extra" != '[]' ]; then
+    if ! jq --argjson extra "$extra" '.captains_call += $extra' "$tmp" > "$tmp.next"; then
+      rm -f -- "$tmp" "$tmp.next"
+      fail "cannot add the durable decision cards to the composed payload"
+    fi
+    mv -f -- "$tmp.next" "$tmp" || { rm -f -- "$tmp" "$tmp.next"; fail "cannot publish the composed payload"; }
+  fi
   if ! validate_payload "$tmp"; then
     rm -f -- "$tmp"
     fail "the composed payload does not satisfy $BOARD_SCHEMA"
