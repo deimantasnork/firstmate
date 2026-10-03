@@ -60,7 +60,9 @@
 # date or registering a `types.custom` captain issue type. The command records
 # a UTC `Captain hold set:` timestamp in the task body: repeating an active
 # hold preserves the existing timestamp, while re-holding released work starts
-# a new lifecycle. A task already closed is refused rather than reopened.
+# a new lifecycle. It also records how many answers existed at raise time,
+# so only a record added during this hold can be retried as its answer.
+# A task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
@@ -108,7 +110,8 @@
 # resumes; anything else is skipped. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
+# close mode both match the newest record for the current hold is reported
+# `closed:` and is a no-op;
 # a mode mismatch is skipped. The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
@@ -513,6 +516,12 @@ recorded_decision_digest() {  # <task-body>
   printf '%s' "$rest"
 }
 
+body_has_recorded_digest() {  # <shown-task-body> <digest>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" | grep -Fqx "Decision digest: $2"
+}
+
 # How many resolution records the shown body carries, in either record format.
 resolution_record_count() {  # <task-body>
   local body
@@ -800,22 +809,58 @@ body_hold_set_timestamp() {  # <decoded-task-body>
     | head -1
 }
 
+# The number of answers already recorded when this hold was raised. It binds
+# an interrupted answer to this hold even when an older answer has the same
+# digest. Older active holds have no baseline; only a leading pre-collapse
+# resolution with no hold-set stamp proves its interrupted replay.
+body_hold_answer_baseline() {  # <decoded-task-body>
+  printf '%s\n' "$1" \
+    | sed -n '2s/^Captain hold answer baseline: \([0-9][0-9]*\)$/\1/p' \
+    | head -1
+}
+
+strip_hold_header() {  # <decoded-task-body>
+  local body=$1 hold_set baseline
+  hold_set=$(body_hold_set_timestamp "$body")
+  if [ -n "$hold_set" ]; then
+    body=${body#"Captain hold set: $hold_set"}
+    body=${body#$'\n'}
+    baseline=$(body_hold_answer_baseline "$1")
+    if [ -n "$baseline" ]; then
+      body=${body#"Captain hold answer baseline: $baseline"}
+      body=${body#$'\n'}
+    fi
+    body=${body#$'\n'}
+  fi
+  printf '%s' "$body"
+}
+
+record_is_for_current_hold() {  # <shown-task-body>
+  local body baseline count
+  body=$(decode_shown_value "$1") || return 1
+  baseline=$(body_hold_answer_baseline "$body")
+  if [ -z "$baseline" ]; then
+    [ -z "$(body_hold_set_timestamp "$body")" ] || return 1
+    case "$body" in
+      'Resolution recorded by fm-decision-hold.'*) return 0 ;;
+    esac
+    return 1
+  fi
+  count=$(resolution_record_count "$1")
+  [ "$count" -eq "$((baseline + 1))" ]
+}
+
 write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
-  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
+  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp baseline
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   existing=$(body_hold_set_timestamp "$body")
   if [ "$preserve" = 1 ] && [ -n "$existing" ]; then
     return 0
   fi
-  if [ -n "$existing" ]; then
-    body=${body#"Captain hold set: $existing"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-  fi
-  new_body=$(printf 'Captain hold set: %s' "$hold_set")
+  baseline=$(resolution_record_count "$2")
+  body=$(strip_hold_header "$body")
+  new_body=$(printf 'Captain hold set: %s\nCaptain hold answer baseline: %s' "$hold_set" "$baseline")
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
@@ -1251,18 +1296,17 @@ command_card() {  # <task-id> <card flags>
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
+  local id=$1 mode=$2 body=$3 new_body tmp hold_set baseline header
   new_body=$(resolution_block "$mode")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   hold_set=$(body_hold_set_timestamp "$body")
   if [ -n "$hold_set" ]; then
-    body=${body#"Captain hold set: $hold_set"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+    baseline=$(body_hold_answer_baseline "$body")
+    body=$(strip_hold_header "$body")
+    header=$(printf 'Captain hold set: %s' "$hold_set")
+    [ -z "$baseline" ] || header=$(printf '%s\nCaptain hold answer baseline: %s' "$header" "$baseline")
+    new_body=$(printf '%s\n\n%s' "$header" "$new_body")
   fi
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
@@ -1324,11 +1368,7 @@ remove_interrupted_answer_stamp() {  # <task-id>
     || fail "could not decode the closed body for $id"
   existing=$(body_hold_set_timestamp "$body")
   [ -n "$existing" ] || return 0
-  body=${body#"Captain hold set: $existing"}
-  case "$body" in
-    $'\n\n'*) body=${body#$'\n\n'} ;;
-    $'\n'*) body=${body#$'\n'} ;;
-  esac
+  body=$(strip_hold_header "$body")
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
   if ! printf '%s\n' "$body" > "$tmp" \
@@ -1410,7 +1450,8 @@ command_answer() {
     # checked against an interrupted close's recorded mode so a retry cannot
     # silently flip a release into a close.
     if body_has_resolution_record "$body" \
-      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+      && record_is_for_current_hold "$body"; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
@@ -1424,6 +1465,9 @@ command_answer() {
       publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
+    fi
+    if body_has_recorded_digest "$body" "$DECISION_DIGEST"; then
+      fail "task $id records this answer before the current hold; a replay cannot answer it"
     fi
     write_resolution_record "$id" "$outcome" "$body"
     if ! close_answered "$id" "$release"; then
@@ -1671,6 +1715,14 @@ command_answers() {
     fi
     if [ "$hold_kind" != captain ]; then
       printf 'skipped: %s (not held for the captain)\n' "$id"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if { body_has_recorded_digest "$body" "$digest" \
+      || { [ -n "$legacy_digest" ] && body_has_recorded_digest "$body" "$legacy_digest"; }; } \
+      && { [ "$recorded_digest" != "$digest" ] \
+        || ! record_is_for_current_hold "$body"; }; then
+      printf 'skipped: %s (answer belongs to an earlier hold)\n' "$id"
       skipped=$((skipped + 1))
       continue
     fi

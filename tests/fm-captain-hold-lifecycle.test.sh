@@ -970,6 +970,46 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# An old captured answer belongs to the hold it closed, even when the same
+# task is held again. A retry of the new answer after its release remains safe.
+test_keyed_answer_replay_stays_with_its_hold() {
+  local home id out show before after
+  home=$(make_home keyed-answer-hold-replay)
+  id=sample-reused-call
+  tasks_in "$home" add "$id" "Work with two captain gates" --kind ship --repo sample >/dev/null \
+    || fail "could not create the reused-call fixture"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold "$id" --reason "first gate" >/dev/null \
+    || fail "could not raise hold A"
+  out=$(printf '%s\t%s\t%s\trelease\n' "$id" old-answer "First answer" \
+    | run_captain "$home" answers --source "deck capture one") \
+    || fail "could not answer hold A: $out"
+  assert_contains "$out" "closed: $id" "hold A's answer did not release it"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold "$id" --reason "second gate" >/dev/null \
+    || fail "could not raise hold B"
+  before=$(tasks_in "$home" show "$id" --full)
+  if out=$(printf '%s\t%s\t%s\trelease\n' "$id" old-answer "First answer" \
+    | run_captain "$home" answers --source "deck capture one"); then
+    fail "replaying hold A's answer reported a release of hold B: $out"
+  fi
+  assert_contains "$out" "skipped: $id" "the stale answer was not identified as skipped"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "hold A's replay released hold B"
+  [ "$show" = "$before" ] || fail "hold A's replay changed hold B's durable record"
+
+  out=$(printf '%s\t%s\t%s\trelease\n' "$id" new-answer "Second answer" \
+    | run_captain "$home" answers --source "deck capture two") \
+    || fail "could not answer hold B: $out"
+  assert_contains "$out" "closed: $id" "hold B's answer did not release it"
+  before=$(tasks_in "$home" show "$id" --full)
+  out=$(printf '%s\t%s\t%s\trelease\n' "$id" new-answer "Second answer" \
+    | run_captain "$home" answers --source "deck capture two") \
+    || fail "the duplicate answer for hold B was not idempotent: $out"
+  assert_contains "$out" "closed: $id" "the duplicate answer for hold B was not accepted"
+  after=$(tasks_in "$home" show "$id" --full)
+  [ "$after" = "$before" ] || fail "the duplicate answer for hold B changed its durable record"
+  pass "keyed answer replay cannot release a later hold and a current duplicate is idempotent"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4739,6 +4779,7 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_keyed_answer_replay_stays_with_its_hold
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
