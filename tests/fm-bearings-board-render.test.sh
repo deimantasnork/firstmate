@@ -92,6 +92,17 @@ require_listener_reached_poll() {  # <home>
   fail "the board listener did not reach the Lavish poll (owner: ${owner:-none})"
 }
 
+run_board() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" "$@"
+}
+
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
 render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
@@ -101,11 +112,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  run_board "$home" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
@@ -238,6 +245,74 @@ test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   pass "an underway identifier label is not replaced by run status"
 }
 
+test_refresh_shows_secondmate_children_when_main_has_no_workers() {
+  local home mate id gen out
+  home=$(make_home secondmate-underway)
+  mkdir -p "$home/config" "$home/projects"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # Keep endpoint and validation reads inside the fixture toolchain. The real
+  # snapshot and summary producer still reconcile metadata and semantic state.
+  fm_fake_exit0 "$home/fakebin" no-mistakes
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$home/fakebin/tmux"
+  for id in building idle; do
+    mate="$TMP_ROOT/secondmate-underway-$id"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects" "$mate/bin"
+    printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+    printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+    printf '## In flight\n' > "$mate/data/backlog.md"
+    printf -- '- %s - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-10-03)\n' \
+      "$id" "$mate" >> "$home/data/secondmates.md"
+    if [ "$id" = building ]; then
+      mkdir -p "$mate/projects/child"
+      printf -- '- [ ] child - Build the secondmate change (repo: sample) (kind: ship) (since 2026-10-03)\n' \
+        >> "$mate/data/backlog.md"
+      fm_write_meta "$mate/state/child.meta" \
+        "window=firstmate:fm-child" "worktree=$mate/projects/child" "project=sample" \
+        "harness=claude" "kind=ship" "mode=local-only"
+      gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" child)
+      "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" child busy --gen "$gen" \
+        --source claude-hook --event user-prompt-submit \
+        || fail "the secondmate child's busy state was not recorded"
+      printf 'working: implementing the change\n' > "$mate/state/child.status"
+    fi
+    printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+    PATH="$home/fakebin:$PATH" FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
+      FM_CONFIG_OVERRIDE="$mate/config" FM_PROJECTS_OVERRIDE="$mate/projects" \
+      bash "$ROOT/bin/fm-home-summary-refresh.sh" \
+      || fail "the $id secondmate summary was not published"
+  done
+  jq -e '.valid and [.active_children[].id] == ["child"]' \
+    "$TMP_ROOT/secondmate-underway-building/state/home-summary.json" >/dev/null \
+    || fail "the building secondmate fixture has no active child"
+  jq -e '.valid and .active_children == []' \
+    "$TMP_ROOT/secondmate-underway-idle/state/home-summary.json" >/dev/null \
+    || fail "the idle secondmate fixture has active children"
+  run_board "$home" refresh >/dev/null || fail "the board did not refresh from the real snapshot"
+  require_listener_reached_poll "$home"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
+    || fail "the refreshed board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and ([.stats[] | select(.label == "underway") | .n] == [1])
+      and (.underway | length) == 1
+      and (.underway[0]
+        | .title == "Build the secondmate change"
+          and (.sub | startswith("harness busy (claude-hook)"))
+          and (.sub | test("sample")) and (.sub | test("ship"))
+          and [.badges[].text] == ["working"])
+  ' >/dev/null || fail "the board did not show only the active secondmate child: $out"
+  pass "refresh shows a registered secondmate child without main workers or idle-mate rows"
+}
+
 test_charted_next_reads_newest_filed_first() {
   local home out
   home=$(make_home charted-order)
@@ -268,6 +343,7 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
+test_refresh_shows_secondmate_children_when_main_has_no_workers
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
