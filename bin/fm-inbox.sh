@@ -38,6 +38,9 @@
 # retry are distinguishable. The binding is recorded before announcement, so a
 # crash between save and wake still replays the original note. Without
 # --request-id the historical one-note-per-call behaviour is unchanged.
+# Issue discovery also accepts issue:<owner>/<repo>#<number>@<ISO UTC stamp>.
+# These ids use an injective, flat reservation filename (slash becomes @);
+# existing request ids keep their reservation paths and replay identities.
 # `announce` repairs the wake for an already-saved note without creating another.
 # A note already acknowledged (in handled/) gets no wake from `announce` or a
 # request-id replay; both report it as acknowledged and exit 0.
@@ -217,6 +220,10 @@ need_python() {
 }
 
 valid_request_id() {
+  if [[ "$1" =~ ^issue:[A-Za-z0-9_-]+/[A-Za-z0-9._-]+#[1-9][0-9]*@[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    [ "${#1}" -le 240 ]
+    return
+  fi
   case "$1" in
     ''|.*|*/*|*[[:space:]]*) return 1 ;;
   esac
@@ -225,6 +232,10 @@ valid_request_id() {
     *[!A-Za-z0-9._:-]*) return 1 ;;
   esac
   return 0
+}
+
+request_reservation() {  # <validated request-id>
+  printf '%s/%s\n' "$REQUESTS" "${1//\//@}"
 }
 
 valid_note_id() {
@@ -399,7 +410,7 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
 
 claim_request_id() {  # <request-id> <note-id>  -> 0 claimed, 1 already exists
   local request_id=$1 note_id=$2 reserved
-  reserved="$REQUESTS/$request_id"
+  reserved=$(request_reservation "$request_id")
   mkdir -p "$REQUESTS"
   if ( set -C; printf '%s\n' "$note_id" >"$reserved" ) 2>/dev/null; then
     return 0
@@ -409,7 +420,8 @@ claim_request_id() {  # <request-id> <note-id>  -> 0 claimed, 1 already exists
 
 publish_from_reservation() {  # <request-id> <source> <body> <extra>
   local request_id=$1 source=$2 body=$3 extra=$4
-  local reserved="$REQUESTS/$request_id" id tmp
+  local reserved id tmp
+  reserved=$(request_reservation "$request_id")
   [ -f "$reserved" ] || return 1
   id=$(tr -d '\r' <"$reserved")
   id=${id%%$'\n'*}
@@ -434,7 +446,7 @@ queue_note() {
   local tmp id summary staging_name reserved
 
   if [ -n "$request_id" ]; then
-    reserved="$REQUESTS/$request_id"
+    reserved=$(request_reservation "$request_id")
     if [ -f "$reserved" ]; then
       id=$(publish_from_reservation "$request_id" "$source" "$body" "$extra") \
         || die "request id $request_id is reserved but unreadable; retry the same request id"
@@ -478,7 +490,7 @@ cmd_note() {
         [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
         request_id=$2
         valid_request_id "$request_id" \
-          || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-)"
+          || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-, or a canonical issue discovery id)"
         shift 2
         ;;
       --) shift; break ;;

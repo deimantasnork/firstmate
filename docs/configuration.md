@@ -1461,6 +1461,17 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Open-issue discovery
+
+Open-issue discovery is opt-in per operational home.
+Run `FM_HOME=/absolute/home bin/fm-issue-triage.sh arm` in the installed checkout to enable it, or `FM_HOME=/absolute/home bin/fm-issue-triage.sh disarm` to retire it.
+Bootstrap refreshes an already trusted check and leaves disarmed homes alone.
+The existing watcher runs the check on its slow-check cadence; the routine limits GitHub polling to hourly attempts.
+
+Discovery reads the registered projects' GitHub origins and delivers each new or updated open issue as a durable inbox note for firstmate's normal triage and backlog judgment.
+It reads one bounded page per repository, so older issues outside that page are uncovered until they enter it; GitHub mutation and automatic implementation are outside this routine.
+[`bin/fm-issue-triage.sh`](../bin/fm-issue-triage.sh)'s header and `--help` own registry resolution, page and time bounds, skip and failure behavior, ledger fields, and the exact request-id replay contract.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.

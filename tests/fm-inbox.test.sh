@@ -123,6 +123,24 @@ assert_contains "$replay_human" "replay $first_id" \
 assert_equals "1" "$(count_notes "$home")" "human replay still does not duplicate"
 pass "the same request id returns the original note as a distinguishable replay"
 
+home=$(make_home issue-id)
+issue_request='issue:org/repo#12@2026-10-05T11:00:00Z'
+first=$(run_inbox "$home" note --request-id "$issue_request" --json 'external issue')
+second=$(run_inbox "$home" note --request-id "$issue_request" --json 'external issue')
+assert_equals "$issue_request" "$(printf '%s' "$first" | json_get request_id)" 'issue request id stays exact'
+assert_equals "$(printf '%s' "$first" | json_get id)" "$(printf '%s' "$second" | json_get id)" 'issue replay returns the original note'
+assert_equals replay "$(printf '%s' "$second" | json_get outcome)" 'issue replay is distinguishable'
+assert_equals 1 "$(count_notes "$home")" 'issue replay creates no duplicate note'
+assert_equals 1 "$(count_wakes "$home")" 'issue replay creates no duplicate wake'
+for unsafe in 'issue:org/repo/extra#12@2026-10-05T11:00:00Z' \
+  'issue:org/repo#12@2026-10-05T11:00:00Z/../../escape' 'ordinary/id' 'ordinary@id'; do
+  rc=0
+  run_inbox "$home" note --request-id "$unsafe" 'refuse' >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" 'special request-id punctuation is restricted to canonical issue ids'
+done
+assert_equals 1 "$(count_notes "$home")" 'invalid issue ids create no new notes'
+pass 'canonical issue discovery ids are safe, exact, and idempotent'
+
 # --- crash window: reservation exists, note not yet published ---------------
 
 home=$(make_home crash-reserve)

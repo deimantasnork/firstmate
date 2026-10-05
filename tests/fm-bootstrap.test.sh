@@ -897,6 +897,45 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+test_issue_check_refresh_is_opt_in_and_local() {
+  local home case_dir fakebin out
+  case_dir="$TMP_ROOT/issue-discovery-bootstrap"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/data" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  assert_absent "$home/state/issue-triage.check.sh" 'bootstrap must not opt an unarmed home in'
+  assert_not_contains "$out" 'issue discovery could not be armed' 'an unarmed home is not an error'
+  printf '# previous trusted installed shim\n' > "$home/state/issue-triage.check.sh"
+  chmod 700 "$home/state/issue-triage.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" issue-triage >/dev/null
+  cp "$home/state/issue-triage.check.sh" "$case_dir/old-shim"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+  cmp -s "$case_dir/old-shim" "$home/state/issue-triage.check.sh" || fail 'detect-only bootstrap mutated issue check'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  cmp -s "$case_dir/old-shim" "$home/state/issue-triage.check.sh" || fail 'network-only bootstrap repeated the local issue arm'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  if cmp -s "$case_dir/old-shim" "$home/state/issue-triage.check.sh"; then
+    fail 'mutable local bootstrap did not refresh the armed issue check'
+  fi
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-check-lib.sh"
+    fm_custom_check_registered "$FM_HOME/state" issue-triage' bash "$ROOT" \
+    || fail 'bootstrap must bind the refreshed issue shim'
+  FM_HOME="$home" "$ROOT/bin/fm-issue-triage.sh" disarm >/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  assert_absent "$home/state/issue-triage.check.sh" 'bootstrap must preserve explicit disarm'
+  pass 'bootstrap refreshes only opted-in issue discovery during mutable local startup'
+}
+
 # FM_BOOTSTRAP_NETWORK splits one bootstrap run into its local and network
 # halves so a session start can compose its digest from the local half alone and
 # run the network half concurrently. The property that has to hold is that the
@@ -1326,6 +1365,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_issue_check_refresh_is_opt_in_and_local
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times

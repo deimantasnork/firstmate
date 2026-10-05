@@ -1652,6 +1652,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
   fi
+  # Refresh the issue-discovery shim only in homes that explicitly armed it.
+  if local_phase && [ -x "$SCRIPT_DIR/fm-issue-triage.sh" ]; then
+    "$SCRIPT_DIR/fm-issue-triage.sh" arm --if-armed >/dev/null \
+      || echo "MISSING: issue discovery could not be armed; coverage is unconfirmed"
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"
