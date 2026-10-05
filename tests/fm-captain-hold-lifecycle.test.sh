@@ -3982,6 +3982,66 @@ SH
 # that accepted window spans two separate lifecycle owners.
 # Queued forge merges are also uncovered because they land asynchronously after
 # the local merge command and its task control lock have returned.
+test_deck_merge_answer_keeps_the_ship_open_until_landing() {
+  local home id pr repo wt store result show out json
+  home=$(make_home deck-merge-release)
+  configure_merged_github "$home"
+  id=sample-deck-merge
+  pr=https://github.com/sample/sample/pull/33
+  repo="$home/projects/sample-deck"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the deck-approved pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the deck merge fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" \
+    --card-title "Merge the sample change" --type merge --risk low --pr-url "$pr" \
+    --option "merge:Merge now" --option "wait:Not yet" --recommend merge >/dev/null \
+    || fail "could not raise the deck merge card"
+  store="$home/state/decision-cards/$id.json"
+  result="$home/deck.result"
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n' > "$result"
+  # Capture the same answer context a deck sends, including the card's close
+  # mode only when the durable card actually carries one.
+  jq -r '.card as $card
+    | ({schema:"fm-bearings-answer.v1", question:$card.key, selection:"merge", note:""}
+       + (if $card | has("close") then {close:$card.close} else {} end)) as $context
+    | ["1", ("Merge now\n\nContext data:\n" + ($context | tojson)), "form", "choice", "Merge now"]
+    | "  " + (map(tojson) | join(","))' "$store" >> "$result" \
+    || fail "could not capture the deck merge answer"
+  out=$(run_lavish "$home" answers "$result" \
+    | run_captain "$home" answers --source "captured deck merge") \
+    || fail "the deck merge answer was refused: $out"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the deck-approved row disappeared"
+  assert_contains "$show" "state: in_flight" "a deck Merge answer closed the ship before landing"
+  assert_contains "$show" "held: no" "the deck Merge answer did not release the hold"
+  assert_contains "$show" "Resolution mode: released" "the deck answer did not record a release"
+  assert_absent "$home/state/$id.pr-poll-merge-notified" "the deck answer invented a landing record"
+  json=$(run_bearings "$home") || fail "Bearings failed before the merge landed"
+  printf '%s' "$json" | jq -e --arg id "$id" '.landed | all(.id != $id)' >/dev/null \
+    || fail "the deck-approved ship appeared landed before the merge"
+  out=$(run_lavish "$home" answers "$result" \
+    | run_captain "$home" answers --source "captured deck merge") \
+    || fail "replaying the deck merge answer was not idempotent: $out"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" "replaying the deck answer closed the ship"
+
+  run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
+    || fail "the deck-approved merge was refused: $(cat "$home/merge.err")"
+  assert_present "$home/state/$id.pr-poll-merge-notified" "the confirmed merge lacked its landing record"
+  assert_grep "check: merge landed: $id $pr" "$home/state/.wake-queue" \
+    "the confirmed merge did not publish its landing"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup after the deck-approved landing failed: $(cat "$home/teardown.err")"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "the landed ship row did not close"
+  pass "a deck Merge answer releases the in-flight ship until a confirmed landing"
+}
+
 test_released_merge_passes_the_entrypoint_and_lands() {
   local home id pr repo wt show json
   home=$(make_home released-merge-entrypoint)
@@ -4220,6 +4280,25 @@ test_hold_writes_a_raise_time_decision_card() {
   mode=$(stat -c %a "$store" 2>/dev/null || stat -f %Lp "$store")
   [ "$mode" = "600" ] || fail "the raise-time card is not 0600: $mode"
   pass "hold writes the raise-time decision card into the durable store"
+}
+
+test_authored_merge_cards_enforce_release_mode() {
+  local home store
+  home=$(make_home authored-merge-release)
+  store="$home/state/decision-cards/sample-authored-merge.json"
+  run_captain "$home" hold sample-authored-merge --title "Ship the approved change" \
+    --reason "captain merge approval pending" --repo sample \
+    --card-title "Merge the sample change" --type merge --risk low \
+    --option "merge:Merge now" --close "done" >/dev/null \
+    || fail "could not raise an authored merge card"
+  jq -e '.card.close == "release"' "$store" >/dev/null \
+    || fail "an authored merge card retained a premature completion mode"
+  jq '.card | del(.close)' "$store" > "$home/card.json"
+  run_captain "$home" card sample-authored-merge --card-file "$home/card.json" >/dev/null \
+    || fail "could not rewrite the merge card from a file"
+  jq -e '.card.close == "release"' "$store" >/dev/null \
+    || fail "a file-authored merge card defaulted to completion"
+  pass "flag and file-authored merge cards enforce release mode"
 }
 
 test_hold_refuses_an_invalid_card_before_any_mutation() {
@@ -4767,6 +4846,7 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+test_deck_merge_answer_keeps_the_ship_open_until_landing
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
@@ -4830,6 +4910,7 @@ test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
 test_hold_writes_a_raise_time_decision_card
+test_authored_merge_cards_enforce_release_mode
 test_hold_refuses_an_invalid_card_before_any_mutation
 test_card_rewrites_an_open_call_and_a_rehold_preserves_it
 test_card_refuses_a_closed_call

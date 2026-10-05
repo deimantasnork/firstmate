@@ -366,14 +366,15 @@ test_build_injects_binds_then_arms() {
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
   assert_present "$board" "build reported success without a board"
 
-  # Round-trip: apart from the reconcile choice the build adds to every
-  # decision card, the payload extracted from the built page is the same JSON
+  # Round-trip: apart from the reconcile choice and enforced merge release,
+  # the payload extracted from the built page is the same JSON
   # document, and the escaped </script> string can no longer terminate the
   # data block.
   extract_payload "$board" | jq -S . > "$home/extracted.json" \
     || fail "the built board does not carry parseable payload JSON"
   jq -S '.captains_call = [.captains_call[]
-      | .options = [.options[] | select(.value != "reconcile")]]' \
+      | .options = [.options[] | select(.value != "reconcile")]
+      | if .type == "merge" then del(.close) else . end]' \
     "$home/extracted.json" > "$home/stripped.json"
   jq -S '.captains_call = [.captains_call[]
       | .options = [.options[] | select(.value != "reconcile")]]' \
@@ -837,6 +838,39 @@ test_build_persists_decision_cards_durably() {
   pass "build persists the effective decision cards for later readers"
 }
 
+test_build_merge_cards_release_instead_of_completing_work() {
+  local home data source mode key title
+  key=merge.sample-task
+  for source in payload store; do
+    for mode in omitted "done"; do
+      home=$(make_home "merge-release-$source-$mode")
+      data="$home/payload.json"
+      write_valid_payload "$data"
+      title="Merge from $source"
+      jq --arg mode "$mode" --arg title "$title" '
+        .captains_call[1].title = $title
+        | if $mode == "done" then .captains_call[1].close = "done" else . end' \
+        "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+      if [ "$source" = store ]; then
+        mkdir -p "$home/state/decision-cards"
+        jq '{schema:"fm-decision-card.v1", generated:"2026-09-28T12:30:04Z",
+          card:.captains_call[1]}' "$data" > "$home/state/decision-cards/$key.json"
+        jq '.captains_call[1].title = "Older composed merge"' "$data" > "$data.tmp" \
+          && mv "$data.tmp" "$data"
+      fi
+      run_board "$home" build "$data" >/dev/null || fail "$source merge card did not build"
+      extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+      jq -e --arg key "$key" --arg title "$title" '
+        (.captains_call[] | select(.key == $key) | .close == "release" and .title == $title)
+        and (.captains_call[0] | has("close") | not)' "$home/served.json" >/dev/null \
+        || fail "$source merge card with $mode close mode could complete unlanded work"
+      jq -e '.card.close == "release"' "$home/state/decision-cards/$key.json" >/dev/null \
+        || fail "the effective $source merge card did not persist its release mode"
+    done
+  done
+  pass "payload and stored merge cards release holds instead of completing work"
+}
+
 test_build_merges_the_durable_card_store_first() {
   local home data store key
   home=$(make_home store-first)
@@ -981,6 +1015,7 @@ test_refresh_refuses_a_broken_snapshot_before_touching_the_board() {
 }
 
 test_path_is_stable_and_home_scoped
+test_build_merge_cards_release_instead_of_completing_work
 test_build_persists_decision_cards_durably
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values

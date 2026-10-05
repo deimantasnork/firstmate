@@ -524,7 +524,7 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
     drop=$drop$key$'\n'
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
-  jq --argjson dropped "$tmp" '
+  jq --argjson dropped "$tmp" "$FM_DECISION_CARD_JQ_DEFS"'
     .captains_call = [
       .captains_call[]
       | . as $card
@@ -537,6 +537,7 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
           hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
         }]
         else . end
+      | with_merge_release
     ]' "$data" > "$dest" || return 1
 }
 

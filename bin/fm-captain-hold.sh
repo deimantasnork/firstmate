@@ -78,7 +78,8 @@
 # recommendation the moment it is raised; `card` rewrites that record for an
 # open call. The store is then a source as well as a sink: bin/fm-bearings-board.sh
 # merges a stored record FIRST for its key, so an older composed copy can never
-# shadow the card written at raise time. Validation is fail-closed and runs
+# shadow the card written at raise time. Effective close modes follow
+# bin/fm-decision-card-lib.sh. Validation is fail-closed and runs
 # before the hold's first mutation, so a malformed card changes nothing.
 #
 # `answer` records the captain's exact words and resolves the call in the same
@@ -1132,7 +1133,8 @@ write_decision_card() {  # <card.json>
   key=$(jq -r '.key' "$card") || fail "cannot read the decision card key"
   validate_slug task-id "$key"
   envelope=$(jq -c --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{schema:"fm-decision-card.v1", generated:$generated, card:.}' "$card") \
+    "$FM_DECISION_CARD_JQ_DEFS"'
+    with_merge_release | {schema:"fm-decision-card.v1", generated:$generated, card:.}' "$card") \
     || fail "cannot wrap the decision card"
   tmp=$(umask 077; mktemp "$dir/.card.XXXXXX") || fail "cannot stage the decision card"
   if printf '%s\n' "$envelope" > "$tmp" \

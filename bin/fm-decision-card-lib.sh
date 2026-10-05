@@ -3,7 +3,8 @@
 # Usage: . bin/fm-decision-card-lib.sh; splice "$FM_DECISION_CARD_JQ_DEFS"
 # ahead of a jq program, then test a card with `call_item`, name the first
 # broken invariant with `call_reasons`, or accept a durable record that already
-# carries the injected reconcile choice with `stored_call_item`.
+# carries the injected reconcile choice with `stored_call_item`. After
+# validation, `with_merge_release` supplies the effective close mode.
 #
 # ONE OWNER for the authored-card contract. Three surfaces answer the same
 # question - "is this a well-formed card the captain can be shown": the payload
@@ -17,9 +18,14 @@
 # a flag - must never supply it. `stored_call_item` is the reader-side form for
 # the durable store, whose records are the EFFECTIVE cards and therefore carry
 # that injected choice exactly once.
+# Effective merge cards always carry `close: "release"`: a merge approval
+# releases held work, while the landing record owns completion of that work.
+# An authored `done` mode cannot turn approval into evidence of landing.
 
 # shellcheck disable=SC2034,SC2016
 FM_DECISION_CARD_JQ_DEFS='
+    def with_merge_release:
+      if .type == "merge" then .close = "release" else . end;
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
