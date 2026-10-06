@@ -52,6 +52,10 @@ The clear is refused before anything is sent when the recorded backend cannot de
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses at once by naming the pending text.
 Any other verdict (`unknown`, `pending-unproven`, or an unreadable read) is re-read for a bounded settle window, because a pane still finishing a turn can briefly draw a composer the classifier cannot yet prove, and refuses as not proven empty only if it never settles, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 
+`exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
+A stopped agent whose pane still shows the dialog text is not refused.
+[`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
+
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
