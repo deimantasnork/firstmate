@@ -132,6 +132,44 @@ EOF
     "mode=ship"
 }
 
+test_contribution_input_large_backlog() {
+  local home out
+  home=$(make_home contribution-mate)
+  out="$home/contribution-input.json"
+  awk 'BEGIN {
+    print "## Done"
+    for (i = 1; i <= 256; i++) {
+      padding = sprintf("%0512d", 0)
+      printf "- [x] contribution-%d - Synthetic contribution %d %s https://github.com/o/r/pull/%d (repo: alpha) (kind: ship) (merged 2026-07-06)\n", i, i, padding, i
+    }
+  }' > "$home/data/backlog.md"
+  fm_write_meta "$home/state/contribution-256.meta" \
+    "kind=ship" \
+    "pr=https://github.com/o/r/pull/256" \
+    "pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  FM_HOME="$home" "$SNAPSHOT" --contribution-input > "$out" \
+    || fail "large-backlog contribution input must succeed"
+  jq -se --arg home "$home" '
+    length == 1 and (.[0]
+      | keys == ["backlog", "tasks"]
+        and .backlog.path == ($home + "/data/backlog.md")
+        and .backlog.present == true
+        and (.backlog | tojson | length) > 262144
+        and (.backlog.records | length) == 256
+        and .backlog.records[0].id == "contribution-1"
+        and .backlog.records[255].id == "contribution-256"
+        and all(.backlog.records[];
+          .structured == true and .state == "done"
+          and .pr_url == ("https://github.com/o/r/pull/" + (.order | tostring)))
+        and .tasks == [{id:"contribution-256",kind:"ship",
+          pr:{url:"https://github.com/o/r/pull/256",head:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          merge_authority:"attended"}])
+  ' "$out" >/dev/null \
+    || fail "contribution input must preserve a backlog above the argument limit and task metadata"
+  pass "contribution input preserves large home-local backlogs and task metadata"
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -1152,6 +1190,7 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_contribution_input_large_backlog
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
