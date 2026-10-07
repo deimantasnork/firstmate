@@ -125,7 +125,7 @@ mate_status=$?
   || fail "real-SDK secondmate lifecycle guard failed against Pi $PI_VERSION: $(cat "$TMP_ROOT/mate-output")"
 pass "real Pi SDK $PI_VERSION loads the spawned mate extension and reports main busy then idle into parent state"
 if [ "${FM_PI_BRANCH_LIVE_LIFECYCLE_ONLY:-0}" = 1 ]; then
-  printf '# all Pi secondmate lifecycle checks passed (%s)\n' "$TESTS"
+  printf '# Pi secondmate lifecycle guard passed\n'
   exit 0
 fi
 
