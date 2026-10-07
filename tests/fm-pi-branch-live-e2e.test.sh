@@ -28,6 +28,9 @@
 # placeholder key for their never-contacted fake provider. Run after
 # every Pi upgrade and before trusting refreshed per-harness evidence
 # (docs/verification/runtime-backends.md).
+# The secondmate lifecycle probe drives a real fm-spawn-generated extension
+# through the SDK's own agent_start/agent_settled events and a local intercepted
+# stream. FM_PI_BRANCH_LIVE_LIFECYCLE_ONLY=1 selects that probe alone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -43,6 +46,89 @@ fi
 PI_VERSION=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-branch-live)
+
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+mate_parent="$TMP_ROOT/mate-parent"
+mate_home="$TMP_ROOT/mate-home"
+mate_agent="$TMP_ROOT/mate-agent"
+fm_test_spawn_home "$mate_parent" pi
+mate_fakebin=$(make_spawn_fakebin "$TMP_ROOT/mate-fake" pi)
+mkdir -p "$mate_home/bin" "$mate_home/data" "$mate_agent"
+printf '# Firstmate\n' > "$mate_home/AGENTS.md"
+printf 'mate\n' > "$mate_home/.fm-secondmate-home"
+printf 'charter\n' > "$mate_home/data/charter.md"
+git -C "$mate_home" init -q -b main
+fm_test_spawn_brief "$mate_parent" mate
+mate_spawn=$(FM_BACKEND=tmux fm_test_run_spawn "$mate_parent" "$mate_home" "$mate_fakebin" mate "$mate_home" --secondmate)
+expect_code 0 $? "secondmate lifecycle probe could not spawn its fixture: $mate_spawn"
+cat > "$mate_agent/models.json" <<'JSON'
+{"providers":{"local-probe":{"baseUrl":"https://local-probe.invalid/v1","api":"openai-completions","apiKey":"local-placeholder","models":[{"id":"probe","name":"probe","contextWindow":8192,"maxTokens":512}]}}}
+JSON
+FM_PROBE_PARENT="$mate_parent" FM_PROBE_MATE="$mate_home" FM_PROBE_AGENT="$mate_agent" \
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module > "$TMP_ROOT/mate-output" 2>&1 <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const pkg = process.env.PI_PACKAGE_DIR;
+const { DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, createAgentSession } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const parent = process.env.FM_PROBE_PARENT, mate = process.env.FM_PROBE_MATE, agentDir = process.env.FM_PROBE_AGENT;
+let release, started;
+const held = new Promise((resolve) => { release = resolve; });
+const requested = new Promise((resolve) => { started = resolve; });
+const chunk = (delta, finish) => `data: ${JSON.stringify({
+  id: "probe", object: "chat.completion.chunk", created: 1, model: "probe",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+})}\n\n`;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://local-probe.invalid/")) throw new Error(`unexpected network: ${url}`);
+  started();
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({ async start(controller) {
+    controller.enqueue(encoder.encode(chunk({ role: "assistant", content: "OK" }, null)));
+    await held;
+    controller.enqueue(encoder.encode(chunk({}, "stop") + "data: [DONE]\n\n"));
+    controller.close();
+  } });
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+};
+const settings = SettingsManager.create(mate, agentDir);
+const loader = new DefaultResourceLoader({
+  cwd: mate, agentDir, settingsManager: settings,
+  additionalExtensionPaths: [`${parent}/state/mate.pi-ext.ts`],
+  noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+const model = registry.find("local-probe", "probe");
+if (!model) throw new Error("local model missing");
+const { session } = await createAgentSession({
+  cwd: mate, sessionManager: SessionManager.inMemory(), settingsManager: settings,
+  resourceLoader: loader, modelRuntime: runtime, model, noTools: "builtin",
+});
+const record = () => readFileSync(`${parent}/state/mate.busy-state`, "utf8");
+const run = session.prompt("Reply OK");
+await requested;
+if (!record().includes("state=busy source=pi-ext")) throw new Error(`real agent_start failed: ${record()}`);
+release();
+await run;
+for (let i = 0; i < 100 && !record().includes("state=idle source=pi-ext"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+if (!record().includes("state=idle source=pi-ext")) throw new Error(`real agent_settled failed: ${record()}`);
+await session.dispose();
+console.log("MATE_LIFECYCLE_OK");
+JS
+mate_status=$?
+[ "$mate_status" -eq 0 ] && [ "$(cat "$TMP_ROOT/mate-output")" = MATE_LIFECYCLE_OK ] \
+  || fail "real-SDK secondmate lifecycle guard failed against Pi $PI_VERSION: $(cat "$TMP_ROOT/mate-output")"
+pass "real Pi SDK $PI_VERSION loads the spawned mate extension and reports main busy then idle into parent state"
+if [ "${FM_PI_BRANCH_LIVE_LIFECYCLE_ONLY:-0}" = 1 ]; then
+  printf '# all Pi secondmate lifecycle checks passed (%s)\n' "$TESTS"
+  exit 0
+fi
+
 repo="$TMP_ROOT/repo"
 home="$TMP_ROOT/home"
 agentdir="$TMP_ROOT/agent-dir"

@@ -529,6 +529,24 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
 
+## Pi secondmate lifecycle delivery
+
+Verified 2026-10-07 against Pi SDK 1.0.4.
+The real resource loader accepts the parent-generated secondmate extension, and the SDK's own main-run events update the parent's record from `busy pi-ext` to `idle pi-ext` through the existing writer.
+The probe intercepts its local provider stream in process and reads no credentials or network responses.
+Refresh after a Pi upgrade with:
+
+```sh
+FM_PI_BRANCH_LIVE_E2E=1 FM_PI_BRANCH_LIVE_LIFECYCLE_ONLY=1 heavy bash bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh --jobs 1
+```
+
+```text
+ok - real Pi SDK 1.0.4 loads the spawned mate extension and reports main busy then idle into parent state
+```
+
+`tests/fm-busy-adapter-wiring.test.sh` and `tests/fm-spawn-dispatch-profile.test.sh` cover Pi and Pi-signed spawn wiring; `tests/fm-task-inbox.test.sh` and `tests/fm-wake-queue.test.sh` cover bounded idle resumption and child-owned draining.
+The launch wiring contract is owned by `bin/fm-spawn.sh`'s `__PIEXT__` header.
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
