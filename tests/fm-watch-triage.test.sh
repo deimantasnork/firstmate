@@ -3163,6 +3163,46 @@ test_wedge_threshold_keeps_a_wait_past_a_default_key_answer() {
   pass "a default-key answer leaves a keyless wait standing, while the worker's own keyless resolved line retracts it"
 }
 
+# A worker waiting on a queued CI job asks a question mid-wait and firstmate
+# answers it. The worker is still waiting on the same job, so its executing run
+# step must not put the lane back on the wedge ladder: before the fix this exact
+# history escalated every STALE_ESCALATE_SECS, with demand-deep-inspection from
+# the third alarm. A decision still open after the wait keeps the ladder.
+test_wedge_threshold_keeps_a_wait_past_a_decision_answered_mid_wait() {
+  local dir state fakebin out capture window key n log
+  local working='state: working · source: run-step · ci running'
+  log=$(printf '%s\n' \
+    'paused [at=1700000000]: CI drive awaits the queued shared-runner job; resume at the checks-green outcome' \
+    'needs-decision [at=1700000100] [key=main-freshness]: the PR is mergeable but behind main, CI queued' \
+    '- mergeable: Allow the checks-green handoff (recommended)' \
+    '- refresh: Keep the current-main requirement' \
+    'Context: the CI drive remains attached awaiting a gate or checks-green outcome.' \
+    'resolved [key=main-freshness] [at=1700000200]: answered: refresh after the CI-ready return')
+
+  dir=$(wedge_threshold_fixture decision-answered-mid-wait "$log" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "an answered mid-wait decision put a waiting lane on the wedge ladder at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an answered mid-wait decision let a waiting lane queue a wedge wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an answered mid-wait decision let a waiting lane count $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  dir=$(wedge_threshold_fixture decision-open-after-wait \
+    "$(printf '%s\n' "${log%$'\n'*}" 'resolved [key=other]: answered elsewhere')" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a decision still open after the wait was absorbed as the wait: $(cat "$out")"
+  grep -F "possible wedge, escalation 1" "$out" >/dev/null \
+    || fail "a decision still open after the wait left the wedge ladder: $(cat "$out")"
+  pass "a decision answered mid-wait leaves the declared wait off the wedge ladder, while a decision still open keeps it"
+}
+
 # The other status-line record. A verified `captain-held:` transfer also reaches
 # this deferral - the mate has an active run attributed to it, so pause_state_class
 # reports working and the stable hash is handed to the wedge timer - but it blocks
@@ -6705,6 +6745,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
+test_wedge_threshold_keeps_a_wait_past_a_decision_answered_mid_wait
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision

@@ -362,9 +362,13 @@ status_is_paused_or_captain_held() {  # <status-line>
 # including the stated default key a keyless decision shares - does not end the
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
-# does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
-# resolved events widens the read to the whole file.
+# does any other later event except a needs-decision or blocked record the
+# decision fold has since closed: a question asked or a blocker hit mid-wait
+# that was answered does not end the wait the worker declared, and the brief
+# never asks the worker to declare it again. A captain-held line counts only
+# while it is the latest event. Bounded like last_status_line: only a tail window
+# made wholly of resolved events and such closed records widens the read to the
+# whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
@@ -383,15 +387,23 @@ status_declared_wait_line() {  # <status-file>
 
 # Walk the status lines on stdin back from the newest event past resolved lines
 # to the first other event, and print it when it is a pause none of those
-# resolved lines share a phase key with. Returns 1 when every event is a
-# resolved line, so a caller reading a bounded window knows to widen it.
+# resolved lines share a phase key with. A needs-decision or blocked record is
+# walked past too when the decision fold (_fm_decision_fold_line, the sole owner
+# of open and closed) opens it and nothing the fold reads after the pause leaves
+# open; one the fold still holds open, or never opened, ends the walk like any
+# other event. The fold runs once, only over decision transitions after the
+# pause, so the cost stays linear in that tail however many records it holds.
+# Returns 1 when no pause is reached through resolved lines and such records,
+# so a caller reading a bounded window knows to widen it.
 _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
-  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0 n open='' held records=0 pause=-1
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
     i=$((i + 1))
   done
+  n=$i
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while [ "$i" -gt 0 ]; do
     i=$((i - 1))
     line=${lines[i]}
@@ -399,20 +411,38 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
     _fm_status_line_is_event "$line" "$legacy_re" || continue
     status_line_verb "$line" verb
     case "$verb" in
-      "$resolve") ;;
-      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
+      "$resolve")
+        key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
+        keys="$keys$key"$'\n'
+        ;;
+      needs-decision|blocked)
+        [ -n "$(_fm_decision_fold_line '' "$line" "$resolve" "$held" '')" ] || return 0
+        records=1
+        ;;
+      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+        pause=$i
+        break
+        ;;
       *) return 0 ;;
     esac
-    key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
-    if [ "$verb" = "$resolve" ]; then
-      keys="$keys$key"$'\n'
-      continue
-    fi
-    case "$keys" in *$'\n'"$key"$'\n'*) return 0 ;; esac
-    printf '%s\n' "$line"
-    return 0
   done
-  return 1
+  [ "$pause" -ge 0 ] || return 1
+  if [ "$records" -eq 1 ]; then
+    for ((i = pause + 1; i < n; i++)); do
+      status_line_verb "${lines[i]}" verb
+      case "$verb" in
+        needs-decision|blocked|"$resolve"|"$held")
+          open=$(_fm_decision_fold_line "$open" "${lines[i]}" "$resolve" "$held" '')
+          ;;
+      esac
+    done
+    [ -z "$open" ] || return 0
+  fi
+  line=${lines[pause]}
+  key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
+  case "$keys" in *$'\n'"$key"$'\n'*) return 0 ;; esac
+  printf '%s\n' "$line"
+  return 0
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to

@@ -560,8 +560,85 @@ test_declared_wait_survives_answers_past_the_event_window() {
   pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
 }
 
+# A worker that declared a wait and then asked a question or hit a blocker
+# mid-wait is still waiting once that record is answered: the brief never asks
+# it to declare the wait again. Only a record the decision fold still holds open
+# (or never opened), a resolved line for the wait's own key, or another later
+# event ends the wait.
+test_declared_wait_survives_a_closed_decision_raised_during_it() {
+  local dir f wait i
+  dir=$(case_dir declared-wait-closed-decision)
+  wait='paused [at=1700000000]: CI drive awaits the queued shared-runner job; resume at the checks-green outcome'
+
+  f="$dir/answered.status"
+  {
+    printf '%s\n' "$wait"
+    printf '%s\n' 'needs-decision [at=1700000100] [key=main-freshness]: the PR is mergeable but behind main, CI queued'
+    printf '%s\n' '- mergeable: Allow the checks-green handoff (recommended) - clean behind branches need no action'
+    printf '%s\n' '- refresh: Keep the current-main requirement - refresh after the CI-ready return'
+    printf '%s\n' 'Context: the CI drive remains attached awaiting a gate or checks-green outcome.'
+    printf '%s\n' 'resolved [key=main-freshness] [at=1700000200]: answered: refresh after the CI-ready return'
+  } > "$f"
+  [ "$(status_declared_wait_line "$f")" = "$wait" ] \
+    || fail "an answered decision raised mid-wait ended the wait: '$(status_declared_wait_line "$f")'"
+  [ "$(status_current_line "$f" ship)" = "$wait" ] \
+    || fail "the crew-state reading lost the wait behind an answered decision: '$(status_current_line "$f" ship)'"
+
+  printf '%s\n%s\n%s\n' "$wait" 'blocked [key=runner]: the shared runner is offline' \
+    'resolved [key=runner]: answered: runner restored' > "$dir/blocker.status"
+  [ "$(status_declared_wait_line "$dir/blocker.status")" = "$wait" ] \
+    || fail "a resolved blocker raised mid-wait ended the wait: '$(status_declared_wait_line "$dir/blocker.status")'"
+
+  printf 'paused: waiting on the vendor release\nneeds-decision: which color\nresolved [key=default]: answered: blue\n' \
+    > "$dir/keyless.status"
+  [ "$(status_declared_wait_line "$dir/keyless.status")" = 'paused: waiting on the vendor release' ] \
+    || fail "a default-key answer to a keyless decision raised mid-wait ended the wait: '$(status_declared_wait_line "$dir/keyless.status")'"
+
+  f="$dir/window.status"
+  printf '%s\n%s\n' "$wait" 'needs-decision [key=main-freshness]: behind main' > "$f"
+  i=0
+  while [ "$i" -le "$FM_CLASSIFY_EVENT_WINDOW_LINES" ]; do
+    printf 'resolved [key=q%s]: answered\n' "$i" >> "$f"
+    i=$((i + 1))
+  done
+  printf '%s\n' 'resolved [key=main-freshness]: answered: refresh' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = "$wait" ] \
+    || fail "an answered decision beyond the event window ended the wait: '$(status_declared_wait_line "$f")'"
+
+  printf '%s\n%s\n%s\n' "$wait" 'needs-decision [key=main-freshness]: behind main' \
+    'resolved [key=other]: answered elsewhere' > "$dir/still-open.status"
+  [ -z "$(status_declared_wait_line "$dir/still-open.status")" ] \
+    || fail "a decision still open after the wait was read as the wait"
+
+  printf '%s\n%s\n%s\n%s\n' "$wait" 'needs-decision [key=main-freshness]: behind main' \
+    'resolved [key=main-freshness]: answered: refresh' 'needs-decision [key=main-freshness]: still behind' \
+    > "$dir/reopened.status"
+  printf '%s\n' 'resolved [key=other]: answered elsewhere' >> "$dir/reopened.status"
+  [ -z "$(status_declared_wait_line "$dir/reopened.status")" ] \
+    || fail "a reopened decision was read as closed behind the wait"
+
+  printf '%s\n%s\n%s\n' 'paused [key=freshness]: waiting on the queue' \
+    'needs-decision [key=freshness]: behind main' 'resolved [key=freshness]: answered: refresh' \
+    > "$dir/own-key.status"
+  [ -z "$(status_declared_wait_line "$dir/own-key.status")" ] \
+    || fail "a resolved line for the wait's own key stopped retracting it"
+
+  printf '%s\n%s\n%s\n%s\n' "$wait" 'needs-decision [key=main-freshness]: behind main' \
+    'resolved [key=main-freshness]: answered: refresh' 'working: refreshing the branch now' \
+    > "$dir/resumed.status"
+  [ -z "$(status_declared_wait_line "$dir/resumed.status")" ] \
+    || fail "a later working event did not end the wait"
+
+  printf '%s\n%s\n%s\n' "$wait" 'needs-decision [key=pending-reply-abc]: not a reserved-form note' \
+    'resolved [key=other]: answered elsewhere' > "$dir/rejected.status"
+  [ -z "$(status_declared_wait_line "$dir/rejected.status")" ] \
+    || fail "a record the decision fold never opened was walked past as closed"
+  pass "a decision or blocker answered mid-wait leaves the wait standing, while an open, reopened, or never-opened record, the wait's own key, and a later event still end it"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
+test_declared_wait_survives_a_closed_decision_raised_during_it
 test_bare_prose_cannot_open_or_close_a_decision
 
 # status_event_recorded is an idempotent retry check: a stamped retry matches,
