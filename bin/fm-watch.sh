@@ -128,6 +128,8 @@
 #                          frozen for another stall interval; unknown or
 #                          ring-unsafe panes keep the parent alarm; empty
 #                          inbox and a fresh child beacon are not idle proof;
+#                          an alarm does not cancel an owed first safe ring,
+#                          and drain steers retain the bounded inbox ladder;
 #                          the foreign queue itself stays read-only, and one
 #                          parent notification covers each no-progress episode
 #   check: secondmate <id> auto-relaunched after <cause> (<where>)
@@ -541,6 +543,7 @@ inbox_steer_check() {  # <window> <task>
   agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   case "$agent_state" in
     dead|missing)
+      [ "$verb" != resume ] || return 0
       if [ "$verb" = retry ]; then
         fm_task_inbox_clear_retry "$STATE" "$task" "$rec" || true
       else
@@ -550,7 +553,14 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  if [ "$verb" = resume ]; then
+    # A busy alarm is one-shot, not a cancellation of the unread steer.
+    # Preserve its provenance and dedup marker while spending only the
+    # remaining delivery attempts after a proven safe idle transition.
+    secondmate_idle_ring_safe "$w" "$rec" || return 0
+  fi
   if window_is_busy "$w" "$tail40"; then
+    [ "$verb" != resume ] || return 0
     [ "$verb" != retry ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
       [ -f "$rec" ] || return 0
@@ -561,15 +571,19 @@ inbox_steer_check() {  # <window> <task>
       return 0
     fi
     verb=escalate
-  elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+  elif [ "$verb" != retry ] && [ "$verb" != resume ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
     reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
     verb=escalate
   fi
   case "$verb" in
-    ring)
-      ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+    ring|resume)
+      ring_rc=1
+      if [ "$(fm_meta_get "$STATE/$task.meta" kind)" != secondmate ] || secondmate_idle_ring_safe "$w" "$rec"; then
+        ring_rc=0
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fi
       if [ "$ring_rc" -eq 3 ]; then
+        [ "$verb" != resume ] || return 0
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
@@ -587,8 +601,11 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     retry)
-      ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      ring_rc=1
+      if [ "$(fm_meta_get "$STATE/$task.meta" kind)" != secondmate ] || secondmate_idle_ring_safe "$w" "$rec"; then
+        ring_rc=0
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fi
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1
@@ -894,37 +911,44 @@ secondmate_busy_class() {  # <window>
 
 # 0 iff a child ring is authorized: exact idle, a live agent, and a composer
 # that is not proven pending. Busy, unknown, dead, missing, and pending
-# composer all refuse, so a Kimi or Claude pane without an exact idle
+# composer all refuse, except a pending copy of this record's own doorbell
+# that the ring helper can safely submit. A pane without an exact idle
 # verdict is never typed into.
-secondmate_idle_ring_safe() {  # <window>
-  local w=$1 backend agent_state cstate
+secondmate_idle_ring_safe() {  # <window> [record-path]
+  local w=$1 rec=${2:-} backend agent_state cstate line
   [ -n "$w" ] || return 1
   [ "$(secondmate_busy_class "$w")" = idle ] || return 1
   backend=$(window_backend "$w")
   agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   [ "$agent_state" = alive ] || return 1
   cstate=$(fm_backend_composer_state "$backend" "$w" "$(window_label "$w")" 2>/dev/null) || cstate=unknown
-  [ "$cstate" != pending ] || return 1
+  if [ "$cstate" = pending ]; then
+    [ -n "$rec" ] || return 1
+    line=$(fm_task_inbox_doorbell_line "$rec") || return 1
+    fm_task_inbox_composer_holds "$backend" "$w" "$line" "$(window_label "$w")" || return 1
+  fi
   return 0
 }
 
-# Write one fire-and-forget drain steer and ring the child's doorbell. The
+# Write one acknowledgement-tracked drain steer and ring the child's doorbell. The
 # steer carries the same from-firstmate fire-and-forget carrier fm-send uses
 # for a secondmate (marker, then delivery=<16-hex-id>, then the text), so the
 # mate reads it as a parent request that expects no reply, never as captain
 # intervention. The worker's ordinary wake-handling turn drains its own home's
-# wake queue; this parent never rewrites that foreign queue. 0 iff the ring
-# call returned 0.
+# wake queue; this parent never rewrites that foreign queue. The ordinary inbox
+# ladder retries a swallowed or failed doorbell until acknowledgement or its
+# bounded escalation. 0 means the request is durable, never delivery proof.
 secondmate_ring_to_drain() {  # <task> <window>
-  local task=$1 w=$2 rec backend delivery_id
+  local task=$1 w=$2 rec backend delivery_id ring_rc=0
   backend=$(window_backend "$w")
   delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#delivery_id}" -eq 16 ] || return 1
   rec=$(fm_task_inbox_write "$STATE" "$task" \
-    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
-    fire-and-forget) || return 1
-  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
+    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision.") || return 1
+  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+  triage_log "secondmate drain delivery attempt: $task ${rec##*/} result=$ring_rc"
+  return 0
 }
 
 # Surface one durable parent check when the foreign queue's drain position has
@@ -943,7 +967,8 @@ secondmate_ring_to_drain() {  # <task> <window>
 # composer is not pending is rung once so its own home can drain, and the
 # parent notification is withheld until that same row stays frozen for another
 # stall interval. Unknown, busy-over-bound, and ring-unsafe panes keep the
-# parent alarm. Empty inbox and a fresh child beacon are not idle proof.
+# parent alarm, but that alarm never cancels an owed first safe drain request.
+# Empty inbox and a fresh child beacon are not idle proof.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
 secondmate_wake_stall_tick() {
@@ -1006,7 +1031,6 @@ EOF
       rm -f "$ring_marker" || return 1
       continue
     fi
-    [ "$episode_alerted" -eq 0 ] || continue
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
@@ -1023,6 +1047,10 @@ EOF
         continue
       fi
     fi
+    # An alarm raised while the mate was ring-unsafe must not suppress its
+    # first safe drain request after it settles. Only the notification is
+    # deduplicated; the inbox owns subsequent bounded delivery attempts.
+    [ "$episode_alerted" -eq 0 ] || continue
     receipt="$receipt_dir/$row_key"
     if [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ]; then
       fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1

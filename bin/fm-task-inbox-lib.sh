@@ -56,8 +56,11 @@
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
 # by a busy pane consume a separate durable consecutive-poll budget,
 # FM_TASK_INBOX_BUSY_MAX. At that bound the same escalation path surfaces a
-# stuck-busy reason without typing. A non-busy due check or acknowledgement resets
-# this budget. Fire-and-forget retries remain outside escalation. A positively
+# stuck-busy reason without typing. That marker suppresses further alarms,
+# but preserves delivery: remaining paced attempts resume on proven idle.
+# The busy record retains that obligation until acknowledgement or exhaustion
+# of the delivery-attempt budget; ordinary non-busy checks reset it before
+# escalation. Fire-and-forget retries remain outside escalation. A positively
 # dead or missing endpoint skips delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
 # If delivery-attempt or busy-deferral bookkeeping fails while the record remains unhandled,
@@ -446,14 +449,15 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
 
 # The re-ring ladder decision for one task. Prints exactly one of:
 #   quiet                     nothing due (healthy, within grace or spacing,
-#                             or already escalated for the current oldest)
+#                             or escalated without remaining busy delivery)
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
 #   retry <record-path>       a fire-and-forget record's one retry ring is due
+#   resume <record-path>      a busy-escalated record still owes bounded idle delivery
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last busy_base busy_count escalated=0
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
@@ -489,11 +493,20 @@ EOF
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
-    printf 'quiet'
-    return 0
-  fi
   max=$(fm_task_inbox_ring_max)
+  if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
+    # Only a spent busy-deferral budget retains a delivery obligation after
+    # escalation. Delivery exhaustion, unavailable endpoints, and bookkeeping
+    # errors still belong to recovery. Never reset the alarm's dedup marker.
+    { IFS=$(printf '\t') read -r busy_base busy_count < "$dir/.busy-state"; } 2>/dev/null || true
+    case "${busy_count:-}" in ''|*[!0-9]*) busy_count=0 ;; esac
+    if [ "${busy_base:-}" != "$base" ] || [ "$busy_count" -lt "$(fm_task_inbox_busy_max)" ] \
+      || [ "$count" -ge "$max" ]; then
+      printf 'quiet'
+      return 0
+    fi
+    escalated=1
+  fi
   if [ "$count" -ge "$max" ]; then
     printf 'escalate %s %s' "$oldest" "$count"
     return 0
@@ -503,7 +516,11 @@ EOF
     printf 'quiet'
     return 0
   fi
-  printf 'ring %s' "$oldest"
+  if [ "$escalated" -eq 1 ]; then
+    printf 'resume %s' "$oldest"
+  else
+    printf 'ring %s' "$oldest"
+  fi
 }
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-

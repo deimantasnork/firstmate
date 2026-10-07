@@ -127,6 +127,7 @@ The host owns successive watcher cycles through the same arm.
 ## Actionable wake ordering
 
 This section covers what each re-arm owner does between an actionable close and the wake reaching the model.
+The parent fallback for a frozen local secondmate queue is owned by `bin/fm-watch.sh`'s secondmate wake-loop contract; its drain steer's acknowledgement and bounded retries use `bin/fm-task-inbox-lib.sh`.
 
 ### Pi, omp, and OpenCode successor start
 

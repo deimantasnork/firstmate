@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi pi-signed opencode claude codex gemini)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -119,6 +119,34 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+test_pi_secondmate_reports_its_main_lifecycle_to_parent() {
+  local harness rec id sm out state ext
+  for harness in pi pi-signed; do
+    id="busy-sm-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate"
+    mkdir -p "$sm/bin" "$sm/data"
+    printf '# Firstmate\n' > "$sm/AGENTS.md"
+    printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+    printf 'charter\n' > "$sm/data/charter.md"
+    git -C "$sm" init -q -b main
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    out=$(fm_test_run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$id" "$sm" --secondmate)
+    expect_code 0 $? "$harness secondmate spawn should succeed: $out"
+    state="$HOME_DIR/state"; ext="$state/$id.pi-ext.ts"
+    assert_present "$ext" "secondmate omitted its parent-facing lifecycle extension"
+    [ "$(classify "$harness" "$id" "$state")" = 'busy fm-spawn' ] || fail "secondmate did not seed the launch turn"
+    out=$(drive_pi_ext "$ext" settle-idle) || fail "secondmate settle failed: $out"
+    [ "$(classify "$harness" "$id" "$state")" = 'idle pi-ext' ] || fail "idle secondmate stayed unknown to parent"
+    out=$(drive_pi_ext "$ext" agent-start) || fail "secondmate start failed: $out"
+    out=$(drive_pi_ext "$ext" settle-continuing) || fail "secondmate continuing settle failed: $out"
+    [ "$(classify "$harness" "$id" "$state")" = 'busy pi-ext' ] || fail "continuing secondmate became ring-safe"
+    [ ! -e "$sm/state/$id.busy-state" ] || fail "parent-facing lifecycle wrote into mate state"
+  done
+  pass "Pi and Pi-signed secondmates publish their main lifecycle into parent state without confusing branch activity with idle"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -423,6 +451,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_pi_secondmate_reports_its_main_lifecycle_to_parent
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring

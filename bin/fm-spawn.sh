@@ -383,7 +383,9 @@
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#                  written by this script; outside the worktree to avoid pi's trust gate;
+#                  also loaded by Pi secondmates so their main agent_start/agent_settled
+#                  lifecycle is visible to the parent without observing branch activity)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
@@ -2152,7 +2154,7 @@ launch_template() {
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
@@ -4864,7 +4866,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] || [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -4874,6 +4876,9 @@ if [ "$KIND" != secondmate ]; then
   # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
   # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
   # open-close pair.
+  # Pi secondmates also report their main run to the parent's state through
+  # the outside-home extension: primary watcher/branch extensions own child
+  # supervision, but do not publish the mate's own busy/idle lifecycle.
   BUSY_GEN=
   case "$HARNESS" in
   codex*)

@@ -899,8 +899,9 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   inbox_rec=
   for inbox_rec in "$state/mate.inbox/"*.msg; do break; done
   [ -f "$inbox_rec" ] || fail "the child-first ring did not write a drain steer record"
-  sed '/^--$/q' "$inbox_rec" | grep -Fx 'delivery=fire-and-forget' >/dev/null \
-    || fail "the child-first ring did not write a fire-and-forget drain steer"
+  if sed '/^--$/q' "$inbox_rec" | grep -Fx 'delivery=fire-and-forget' >/dev/null; then
+    fail "the child-first drain steer bypassed acknowledgement-tracked delivery"
+  fi
   inbox_body=$(sed '1,/^--$/d' "$inbox_rec")
   [ "$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" kind)" = from-firstmate ] \
     || fail "the child-first drain steer lacks the from-firstmate marker, so the mate would read it as captain intervention: $inbox_body"
@@ -912,6 +913,43 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
   grep -F '[ENTER]' "$dir/sent" >/dev/null \
     || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
   pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
+}
+
+test_secondmate_alarm_preserves_later_idle_drain_delivery() {
+  local dir state sub before rec rings
+  dir=$(make_case secondmate-alarm-then-idle)
+  state="$dir/state"; sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  before=$(cat "$sub/state/.wake-queue")
+  install_secondmate_alive_tmux "$dir/fakebin"
+  install_secondmate_stall_date "$dir/fakebin"
+  printf '1002\n' > "$dir/now"
+  printf '1000\t100-7\n' > "$state/.secondmate-wake-progress-mate"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" FM_SECONDMATE_WAKE_STALL_SECS=1 \
+    bash -c '. "$1"; secondmate_wake_stall_tick' _ "$WATCH" > "$dir/alert.out"
+  grep -F 'secondmate wake-loop stalled' "$dir/alert.out" >/dev/null || fail "unknown mate did not alarm"
+  [ ! -s "$dir/sent" ] || fail "unknown mate was rung"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null || fail "could not arm mate"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen --source pi-ext --event agent-settled >/dev/null || fail "could not settle mate"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" FM_SECONDMATE_WAKE_STALL_SECS=1 \
+    bash -c '. "$1"; secondmate_wake_stall_tick' _ "$WATCH" > "$dir/idle.out"
+  grep -F '[ENTER]' "$dir/sent" >/dev/null || fail "the earlier alarm suppressed idle drain delivery"
+  [ "$(wc -l < "$state/.wake-queue")" -eq 1 ] || fail "idle transition repeated the parent alarm"
+  [ "$(cat "$sub/state/.wake-queue")" = "$before" ] || fail "parent rewrote the foreign queue"
+  rec=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_task_inbox_oldest_unhandled "$2" mate' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state")
+  [ -f "$rec" ] || fail "drain steer is not tracked for acknowledgement"
+  rings=$(wc -l < "$dir/sent")
+  PATH="$dir/fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" FM_TASK_INBOX_GRACE_SECS=0 \
+    bash -c '. "$1"; inbox_steer_check firstmate:fm-mate mate' _ "$WATCH"
+  [ "$(wc -l < "$dir/sent")" -gt "$rings" ] || fail "a swallowed drain doorbell was not retried"
+  pass "a parent alarm leaves the first safe idle drain owed, and a swallowed doorbell stays on the bounded inbox ladder"
 }
 
 # Busy and unknown panes are never typed into. Busy still defers inside the
@@ -3432,6 +3470,7 @@ test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
 test_secondmate_proven_idle_ring_lets_the_child_drain
+test_secondmate_alarm_preserves_later_idle_drain_delivery
 test_secondmate_busy_and_unknown_panes_are_not_rung
 test_secondmate_genuine_stall_after_idle_ring_still_alarms
 test_secondmate_stall_marker_rejects_symlink

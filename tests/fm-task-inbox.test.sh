@@ -731,6 +731,44 @@ test_watcher_waits_on_busy_pane() {
   pass "watcher: busy deferrals survive restart, escalate once at the bound, and never type"
 }
 
+test_watcher_busy_escalation_resumes_idle_delivery() {
+  local dir wakes rec action i
+  dir=$(busy_case busy-resume)
+  rec="$dir/state/t1.inbox/001.msg"
+  busy_steer_check "$dir"
+  busy_steer_check "$dir"
+  wakes=$(wc -l < "$dir/state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "busy deferral did not surface exactly once"
+  busy_steer_check "$dir"
+  [ ! -s "$dir/send.log" ] || fail "resumption rang a still-busy worker"
+
+  # A lost semantic source or a real draft is not permission to resume.
+  printf 'window=sess:fm-t1\nkind=secondmate\nharness=pi\n' > "$dir/state/t1.meta"
+  FM_FAKE_TMUX_AGENT=pi busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ ! -s "$dir/send.log" ] || fail "resumption rang an unknown worker"
+  printf 'window=sess:fm-t1\nkind=ship\nharness=grok\n' > "$dir/state/t1.meta"
+  printf '╭──────────╮\n│ my draft │\n╰──────────╯\n' > "$dir/pending.capture"
+  FM_FAKE_TMUX_AGENT=grok busy_steer_check "$dir" "$dir/pending.capture"
+  [ ! -s "$dir/send.log" ] || fail "resumption submitted a pending draft"
+  [ ! -e "$dir/state/t1.inbox/.ring-state" ] || fail "unsafe resume spent a delivery attempt"
+
+  # Fresh watcher processes resume the remaining paced attempts while the
+  # original escalation remains deduplicated; swallowed sends stay bounded.
+  for i in 1 2 3; do
+    FM_FAKE_TMUX_AGENT=grok busy_steer_check "$dir" "$(idle_capture "$dir")"
+    [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = "$i" ] || fail "idle resume did not spend attempt $i"
+    [ "$(wc -l < "$dir/state/.wake-queue")" = "$wakes" ] || fail "idle resume repeated the alarm"
+  done
+  [ "$(grep -c 'Firstmate instruction waiting' "$dir/send.log")" -eq 3 ] || fail "idle resumption did not ring its bounded budget"
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 3 ] || fail "exhausted resumption kept ringing"
+  mv "$rec" "$dir/state/t1.inbox/handled/"
+  action=$(inbox_lib "$dir/state" fm_task_inbox_due_action "$dir/state" t1)
+  [ "$action" = quiet ] || fail "acknowledged resumption stayed due"
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] && [ ! -e "$dir/state/t1.inbox/.escalated" ] || fail "ack retained resumption markers"
+  pass "watcher: busy escalation preserves bounded idle delivery across restarts without duplicate alarms or unsafe input"
+}
+
 test_watcher_busy_budget_resets_on_ring_and_ack() {
   local dir rec
   dir=$(busy_case busy-reset)
@@ -1198,6 +1236,7 @@ test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
+test_watcher_busy_escalation_resumes_idle_delivery
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
 test_watcher_successor_busy_reset_failure_surfaces idle

@@ -58,4 +58,5 @@ The tool result and clean-exit fallback are owned by `../../../docs/supervision-
 
 When a secondmate is launched on Pi or Pi-signed, `../../../bin/fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`.
 Both files already exist in the secondmate home's git worktree.
+The parent's generated lifecycle extension is loaded alongside them under the `__PIEXT__` contract in `../../../bin/fm-spawn.sh`.
 The PreToolUse-equivalent watcher-arm seatbelt returns `{block: true}` from the `tool_call` event.

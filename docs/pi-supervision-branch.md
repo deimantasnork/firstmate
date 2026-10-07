@@ -26,6 +26,8 @@ This document stays the owner and the contract.
 ## Overview
 
 Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
+Pi secondmate homes use this same dispatcher and main follow-up path for their own queued wakes.
+The parent's idle-ring safety relies on the secondmate's main lifecycle, whose launch wiring is owned by `bin/fm-spawn.sh`'s `__PIEXT__` contract, rather than the supervision branch's activity.
 
 ### What the branch handles while attended
 
