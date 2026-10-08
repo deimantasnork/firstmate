@@ -21,7 +21,8 @@
 # when herdr or jq is missing.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -33,12 +34,24 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
 
+# The agent-named process below is a symlink to fm_agent_standin's stand-in;
+# decide it before any lab session exists so an impossible case skips cleanly.
+STANDIN_DIR=$(fm_test_tmproot fm-control-herdr-standin) || {
+  printf 'not ok - %s\n' "could not create the stand-in directory" >&2
+  exit 1
+}
+STANDIN_BIN=$(fm_agent_standin "$STANDIN_DIR") || {
+  echo "skip: no long-running stand-in binary survives a rename (multicall coreutils, no C compiler)"
+  exit 0
+}
+
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
@@ -207,13 +220,12 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # A registration alone no longer proves an agent (issue #4115): the adapter
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
-# symlink to a long-running system binary named `claude`, the same construction
-# tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
-# signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
+# symlink named `claude` to the fm_agent_standin stand-in decided above, the same
+# construction tests/fm-tmux-agent-liveness.test.sh uses (the symlink name is
+# what the kernel records as argv[0]; tests/lib.sh owns why it is never a copy).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+ln -s "$STANDIN_BIN" "$AGENT_BIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
 
 wait_process_state() {  # <expected> <tries>
@@ -307,7 +319,7 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
 
-# Last: the foreground process is a plain `sleep`, so the pane never draws any
+# Last: the foreground process is the sleeping stand-in, so the pane never draws any
 # recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)
 # therefore refuses before ever typing the exit command, rather than typing it
 # into a live agent that ignores it and reporting a stop that did not happen.
