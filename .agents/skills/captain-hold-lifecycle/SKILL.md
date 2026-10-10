@@ -17,7 +17,9 @@ The agent performs the semantic inventory because scripts must not infer captain
 ## Policy
 
 Every unresolved question that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must be carried by a captain-held task in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
+For a Lavish board-backed handoff, pass the reply through `bin/fm-procevent-lavish.sh arm --agent-reply-file` before appending the status; the adapter owns version-specific acceptance ordering.
 Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
+The originating investigation or review is never its own inventory entry, so hold a separate task for the call and pass `--origin <origin-id>` so `complete` can check it.
 Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Raise that card with the call, not later: pass the card flags to `bin/fm-captain-hold.sh hold` (`--card-title`, `--about`, `--decide`, `--option value:label[:hint]` per option, `--recommend`, `--close release` for captain-gated work) or `--card-file` for a richer card, so the deck shows the real options the moment the captain looks; `bin/fm-captain-hold.sh card <task-id>` refreshes the copy of an open call. The card is validated before the hold is written and the board build merges the stored record first for its key, so never re-author a card a payload already covers - rewrite it through `card`.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
