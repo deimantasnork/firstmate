@@ -547,10 +547,13 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
 # The board is rebuilt from scratch on every composition, so a card that is not
 # in the newest payload disappears with it. The Deck and any later reader still
 # need the options the captain was shown, so every surviving card is persisted
-# per task under state/decision-cards/. A record whose task is definitely no
-# longer an open captain call is pruned; a task whose state cannot be
-# established is kept, because a card wrongly hidden is worse than one wrongly
-# shown - the same asymmetry as the card hygiene above.
+# per task under state/decision-cards/. Exactly one card per key is written,
+# the first payload entry for that key: a payload can list the same call twice,
+# and a store file that carries two JSON documents makes a later reader refuse
+# the whole record. A record whose task is definitely no longer an open captain
+# call is pruned; a task whose state cannot be established is kept, because a
+# card wrongly hidden is worse than one wrongly shown - the same asymmetry as
+# the card hygiene above.
 
 DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
 
@@ -567,8 +570,8 @@ persist_decision_cards() {  # <effective-payload.json>
     keep=$keep$key$'\n'
     card=$(jq -c --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --arg key "$key" \
-      '.captains_call[] | select(.key == $key)
-       | {schema:"fm-decision-card.v1",generated:$generated,card:.}' "$data") || return 1
+      'first(.captains_call[] | select(.key == $key)
+       | {schema:"fm-decision-card.v1",generated:$generated,card:.})' "$data") || return 1
     [ -n "$card" ] || return 1
     tmp=$(umask 077; mktemp "$DECISION_CARDS_DIR/.card.XXXXXX") || return 1
     if printf '%s\n' "$card" > "$tmp" \
