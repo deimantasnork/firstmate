@@ -2,8 +2,9 @@
 # fm-account-choose.sh - choose the credential account one dispatch runs on.
 #
 # Usage:
-#   fm-account-choose.sh --vendor <codex|claude> [--pin <name>] [--config <file>]
-#                        [--model <name>] [--probe-timeout <seconds>]
+#   fm-account-choose.sh --vendor <codex|claude> [--pin <name> | --prefer <name>]
+#                        [--config <file>] [--model <name>]
+#                        [--probe-timeout <seconds>]
 #   fm-account-choose.sh --validate [--config <file>]
 #
 # One subscription account is one named entry in local config/crew-accounts.json
@@ -43,10 +44,15 @@
 # (including a closed one), an exhausted window, or a catalog without the named
 # model never overrides it.
 # The pin's own evidence, including its catalog evidence, is still reported.
-# --pin-optional softens that pin for a caller resolving SEVERAL vendors with one
-# account name, such as a secondmate home that must hold one store per vendor:
-# where the pinned account declares no store for this vendor, the selection
-# falls through to the ordinary fill-first path instead of refusing.
+#
+# --prefer <name> names the account the caller already runs on, such as a
+# secondmate home's recorded store. That account is evaluated first, under
+# exactly the rules above, and stays selected while it is neither closed nor
+# measurably disqualified, so a store with headroom is never traded for an
+# earlier one in declaration order. Only when it is drained does selection
+# continue over the remaining accounts in declaration order. The preferred
+# account must declare a store for this vendor; anything else is a
+# configuration error, as for a pin.
 #
 # Evidence comes from `quota-axi --provider <vendor> --profile-only --full
 # --json` with that account's store in CODEX_HOME or CLAUDE_CONFIG_DIR, so the
@@ -89,8 +95,9 @@
 #   0   selected=<name>, or selected=none because this vendor has no configured
 #       account; the caller keeps its own behavior for both
 #   1   usage or configuration error (unreadable or malformed
-#       config/crew-accounts.json, an unknown pin, a pin with no store for this
-#       vendor, a store path that is not an existing directory, or missing jq)
+#       config/crew-accounts.json, an unknown pin or preferred account, one
+#       with no store for this vendor, a store path that is not an existing
+#       directory, or missing jq)
 #   3   every configured account for this vendor was closed by a 100 percent
 #       reserve or disqualified on measured quota or catalog evidence; the
 #       candidate lines say why, and nothing was selected
@@ -149,7 +156,7 @@ account_store_env() {  # <vendor>
 
 VENDOR=
 PIN=
-PIN_OPTIONAL=0
+PREFER=
 MODEL=
 CONFIG_FILE=
 VALIDATE=0
@@ -172,9 +179,10 @@ while [ "$#" -gt 0 ]; do
       PIN=$2
       shift 2
       ;;
-    --pin-optional)
-      PIN_OPTIONAL=1
-      shift
+    --prefer)
+      [ -n "${2-}" ] || die_usage "--prefer needs a value"
+      PREFER=$2
+      shift 2
       ;;
     --model)
       [ -n "${2-}" ] || die_usage "--model needs a value"
@@ -200,6 +208,7 @@ case "$PROBE_TIMEOUT" in
 esac
 if [ "$VALIDATE" -eq 1 ]; then
   [ -z "$PIN" ] || die_usage "--validate and --pin cannot be combined"
+  [ -z "$PREFER" ] || die_usage "--validate and --prefer cannot be combined"
   [ -z "$VENDOR" ] || die_usage "--validate checks the whole file and takes no --vendor"
   [ -z "$MODEL" ] || die_usage "--validate checks the whole file and takes no --model"
 else
@@ -215,15 +224,18 @@ if [ -n "$MODEL" ]; then
     *[[:space:]]* | *[[:cntrl:]]*) die_usage "--model may not contain whitespace or control characters" ;;
   esac
 fi
-if [ -n "$PIN" ]; then
-  case "$PIN" in
+[ -z "$PIN" ] || [ -z "$PREFER" ] || die_usage "--pin and --prefer cannot be combined"
+for flag in pin prefer; do
+  if [ "$flag" = pin ]; then value=$PIN; else value=$PREFER; fi
+  [ -n "$value" ] || continue
+  case "$value" in
     [a-z0-9]*) ;;
-    *) die_usage "--pin must start with a lowercase letter or digit" ;;
+    *) die_usage "--$flag must start with a lowercase letter or digit" ;;
   esac
-  case "$PIN" in
-    *[!a-z0-9._-]*) die_usage "--pin may contain only lowercase letters, digits, dot, underscore, and dash" ;;
+  case "$value" in
+    *[!a-z0-9._-]*) die_usage "--$flag may contain only lowercase letters, digits, dot, underscore, and dash" ;;
   esac
-fi
+done
 
 CONFIG_FILE=${CONFIG_FILE:-$CONFIG_DIR/crew-accounts.json}
 
@@ -544,16 +556,9 @@ if [ -n "$PIN" ]; then
   PIN_FIELD=$(account_store_field "$VENDOR")
   PIN_RAW=$(account_store_raw "$PIN" "$PIN_FIELD")
   if [ -z "$PIN_RAW" ]; then
-    if [ "$PIN_OPTIONAL" -eq 1 ]; then
-      PIN=
-    else
-      printf 'error: %s: account %s declares no %s store\n' "$CONFIG_FILE" "$PIN" "$VENDOR" >&2
-      exit 1
-    fi
+    printf 'error: %s: account %s declares no %s store\n' "$CONFIG_FILE" "$PIN" "$VENDOR" >&2
+    exit 1
   fi
-fi
-
-if [ -n "$PIN" ]; then
   PIN_STORE=$(require_store "$PIN" "$PIN_FIELD" "$PIN_RAW") || exit 1
   PIN_VERDICT=selected
   if [ -n "$MODEL" ]; then
@@ -573,8 +578,20 @@ fi
 
 CANDIDATE_ORDER=$(account_candidates "$VENDOR") || exit 1
 CANDIDATES=()
+if [ -n "$PREFER" ]; then
+  account_exists "$PREFER" || {
+    printf 'error: %s: preferred account %s is not declared\n' "$CONFIG_FILE" "$PREFER" >&2
+    exit 1
+  }
+  printf '%s\n' "$CANDIDATE_ORDER" | grep -Fxq -- "$PREFER" || {
+    printf 'error: %s: preferred account %s declares no %s store\n' "$CONFIG_FILE" "$PREFER" "$VENDOR" >&2
+    exit 1
+  }
+  CANDIDATES+=("$PREFER")
+fi
 while IFS= read -r name; do
   [ -n "$name" ] || continue
+  [ "$name" != "$PREFER" ] || continue
   CANDIDATES+=("$name")
 done <<EOF
 $CANDIDATE_ORDER

@@ -450,31 +450,6 @@ test_pin_selects_an_account_with_a_closed_reserve() {
   [ "$(field "$out" measured)" = no ] || fail "the pinned store's unmeasurable headroom was not reported: $out"
   log=$(cat "$QUOTA_LOG")
   assert_contains "$log" "CLAUDE_CONFIG_DIR=$colleague" "the pin did not report its own store's evidence: $log"
-
-  out=$(choose --vendor claude --pin colleague --pin-optional)
-  status=$?
-  expect_code 0 "$status" "an optional pin that applies must select a closed account"$'\n'"$out"
-  [ "$(field "$out" selected)" = colleague ] || fail "the optional pin did not select the closed account: $out"
-  [ "$(field "$out" pin)" = yes ] || fail "the optional pin was not disclosed: $out"
-
-  # An optional pin that falls through selects automatically, closure included.
-  mkdir -p "$FIXTURE/store-codex-only"
-  cat > "$CONFIG" <<JSON
-{
-  "accounts": [
-    { "name": "colleague", "claude_config_dir": "$colleague", "reserve": { "claude": 100 } },
-    { "name": "captain", "claude_config_dir": "$captain" },
-    { "name": "codex-only", "codex_home": "$FIXTURE/store-codex-only" }
-  ]
-}
-JSON
-  out=$(choose --vendor claude --pin codex-only --pin-optional)
-  status=$?
-  expect_code 0 "$status" "a fallen-through optional pin should select automatically"$'\n'"$out"
-  [ "$(field "$out" selected)" = captain ] || fail "the fall-through selected a closed account: $out"
-  [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was reported as the pin: $out"
-  assert_contains "$out" "-> skipped:its 100% reserve closes it to automatic selection" \
-    "the fall-through did not skip the closed account: $out"
   pass "an explicit pin still selects an account whose reserve is 100"
 }
 
@@ -606,28 +581,95 @@ JSON
   pass "a pin whose account has no store for the vendor is refused"
 }
 
-test_optional_pin_falls_through_to_automatic_selection() {
+test_preferred_account_with_headroom_stays_selected() {
+  local out status log
+  setup_case prefer-keeps
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 40 through_reset secondary@example.com all_models)"
+  write_default_config
+
+  # Fill-first alone would pick the earlier account; the preferred one still
+  # has headroom, so it is kept and the earlier account is never measured.
+  out=$(choose --vendor codex --prefer secondary)
+  status=$?
+  expect_code 0 "$status" "a preferred account with headroom should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the preferred account was traded for an earlier one: $out"
+  [ "$(field "$out" pin)" = no ] || fail "a preference was reported as a pin: $out"
+  assert_contains "$out" "candidate=primary store=$STORE_A measured=unknown percent=unknown runway=unknown -> not-considered:an earlier account was selected" \
+    "the earlier account was not reported as not considered: $out"
+  log=$(cat "$QUOTA_LOG")
+  assert_not_contains "$log" "CODEX_HOME=$STORE_A" "the earlier account was measured although the preferred one was kept: $log"
+  pass "a preferred account is kept while it has headroom, ahead of declaration order"
+}
+
+test_drained_preferred_account_falls_through_to_fill_first() {
   local out status
-  setup_case pin-optional
+  setup_case prefer-drained
+  write_store "$STORE_A" "$(quota_json codex 87 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 0 exhausted_now secondary@example.com all_models)"
+  write_default_config
+
+  out=$(choose --vendor codex --prefer secondary)
+  status=$?
+  expect_code 0 "$status" "a drained preferred account should fall through"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the drained preferred account was not replaced: $out"
+  assert_contains "$out" "candidate=secondary store=$STORE_B measured=yes percent=0 runway=exhausted_now -> skipped:runway exhausted_now at all_models" \
+    "the drained preferred account's evidence was not reported first: $out"
+
+  # A reserve of 100 closes the preferred account exactly as it closes any other.
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "primary", "codex_home": "$STORE_A" },
+    { "name": "secondary", "codex_home": "$STORE_B", "reserve": { "codex": 100 } }
+  ]
+}
+JSON
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  out=$(choose --vendor codex --prefer secondary)
+  status=$?
+  expect_code 0 "$status" "a closed preferred account should fall through"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the closed preferred account was kept: $out"
+  assert_contains "$out" "-> skipped:its 100% reserve closes it to automatic selection" \
+    "the closure of the preferred account was not reported: $out"
+
+  # With every account drained nothing is selected, exactly as without a preference.
+  write_default_config
   write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
-  write_store "$STORE_B" "$(quota_json codex 87 through_reset secondary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 0 exhausted_now secondary@example.com all_models)"
+  out=$(choose --vendor codex --prefer secondary)
+  status=$?
+  expect_code 3 "$status" "every account drained must refuse with a preference too"$'\n'"$out"
+  pass "a drained or closed preferred account falls through to fill-first selection"
+}
+
+test_preferred_account_must_declare_the_vendor() {
+  local out status
+  setup_case prefer-undeclared
+  write_store "$STORE_A" "$(quota_json codex 87 through_reset primary@example.com all_models)"
   mkdir -p "$FIXTURE/store-claude-only"
   cat > "$CONFIG" <<JSON
 {
   "accounts": [
     { "name": "primary", "codex_home": "$STORE_A" },
-    { "name": "secondary", "codex_home": "$STORE_B" },
     { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" }
   ]
 }
 JSON
 
-  out=$(choose --vendor codex --pin claude-only --pin-optional)
+  out=$(choose --vendor codex --prefer claude-only)
   status=$?
-  expect_code 0 "$status" "an optional pin without this vendor's store must fall through"$'\n'"$out"
-  [ "$(field "$out" selected)" = secondary ] || fail "optional pin did not fall through to selection: $out"
-  [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was still reported as the pin: $out"
-  pass "an optional pin falls through where the account declares no store for the vendor"
+  expect_code 1 "$status" "a preferred account without this vendor's store must refuse"$'\n'"$out"
+  assert_contains "$out" "preferred account claude-only declares no codex store" "the refusal did not name the missing store: $out"
+  out=$(choose --vendor codex --prefer nobody)
+  status=$?
+  expect_code 1 "$status" "an undeclared preferred account must refuse"$'\n'"$out"
+  assert_contains "$out" "preferred account nobody is not declared" "the refusal did not name the account: $out"
+  out=$(choose --vendor codex --prefer primary --pin primary)
+  status=$?
+  expect_code 2 "$status" "--prefer with --pin is a usage error"$'\n'"$out"
+  [ ! -s "$QUOTA_LOG" ] || fail "a refused preference still probed a store: $(cat "$QUOTA_LOG")"
+  pass "a preferred account must be declared with a store for the vendor"
 }
 
 test_no_eligible_account_refuses_with_evidence() {
@@ -999,24 +1041,6 @@ test_pin_bypasses_the_model_catalog() {
   [ "$(field "$out" model_advertised)" = no ] || fail "the pin's catalog evidence was not reported: $out"
   assert_contains "$out" "-> selected:pinned although its model catalog does not advertise gpt-6-sol" \
     "the pinned store's catalog evidence was not disclosed: $out"
-
-  # An optional pin that falls through selects with the catalog axis applied.
-  mkdir -p "$FIXTURE/store-claude-only"
-  cat > "$CONFIG" <<JSON
-{
-  "accounts": [
-    { "name": "secondary", "codex_home": "$STORE_B" },
-    { "name": "primary", "codex_home": "$STORE_A" },
-    { "name": "claude-only", "claude_config_dir": "$FIXTURE/store-claude-only" }
-  ]
-}
-JSON
-  out=$(choose --vendor codex --pin claude-only --pin-optional --model gpt-6-sol)
-  status=$?
-  expect_code 0 "$status" "a fallen-through optional pin should select automatically"$'\n'"$out"
-  [ "$(field "$out" selected)" = primary ] || fail "the fall-through ignored the catalog axis: $out"
-  [ "$(field "$out" pin)" = no ] || fail "a fallen-through pin was reported as the pin: $out"
-  assert_contains "$out" "skipped:its model catalog does not advertise gpt-6-sol" "the fall-through did not skip the lacking store: $out"
   pass "a pin still selects a store whose catalog lacks the model and discloses it"
 }
 
@@ -1076,7 +1100,9 @@ test_probe_reads_the_accounts_own_store_through_its_env_var
 test_pin_overrides_exhaustion_and_the_reserve
 test_pin_of_an_undeclared_account_is_a_configuration_error
 test_pin_without_a_store_for_the_vendor_is_refused
-test_optional_pin_falls_through_to_automatic_selection
+test_preferred_account_with_headroom_stays_selected
+test_drained_preferred_account_falls_through_to_fill_first
+test_preferred_account_must_declare_the_vendor
 test_no_eligible_account_refuses_with_evidence
 test_no_config_selects_nothing
 test_vendor_with_no_configured_account_selects_nothing

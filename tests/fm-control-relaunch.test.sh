@@ -1152,6 +1152,99 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
   pass "fm-control relaunch: a claude secondmate keeps settings.local.json and retires the state settings file and the Stop pointer"
 }
 
+# A relaunch is the safe boundary where a secondmate's drained recorded store is
+# re-resolved (docs/configuration.md "Crew accounts"): the verb hands the launch
+# to fm-spawn --relaunch, which moves only the drained vendor while the home is
+# idle and keeps every store while it has work in flight.
+test_idle_secondmate_relaunch_re_resolves_only_a_drained_store() {
+  local dir home stores out rc
+  dir=$(new_case smstore sms)
+  home="$dir/home"
+  stores="$dir/stores"
+  mkdir -p "$home/config" "$home/data/sms" "$stores"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sms/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-store-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sms\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  quota_store() {  # <dir> <provider> <percent> <runway>
+    mkdir -p "$1"
+    printf '{"schemaVersion":5,"providers":[{"provider":"%s","account":{"email":"%s@example.com"},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"%s"}}]}}]}\n' \
+      "$2" "$2" "$3" "$4" > "$1/.fm-quota.json"
+  }
+  quota_store "$stores/captain-codex" codex 0 exhausted_now
+  quota_store "$stores/captain-claude" claude 60 through_reset
+  quota_store "$stores/colleague-codex" codex 89 through_reset
+  quota_store "$stores/colleague-claude" claude 95 through_reset
+  cat > "$home/config/crew-accounts.json" <<JSON
+{
+  "accounts": [
+    { "name": "captain", "codex_home": "$stores/captain-codex", "claude_config_dir": "$stores/captain-claude" },
+    { "name": "colleague", "codex_home": "$stores/colleague-codex", "claude_config_dir": "$stores/colleague-claude" }
+  ]
+}
+JSON
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  codex) store=${CODEX_HOME:-} ;;
+  claude) store=${CLAUDE_CONFIG_DIR:-} ;;
+  *) exit 2 ;;
+esac
+printf '%s\n' "$store" >> "$(dirname "$0")/quota.log"
+cat "$store/.fm-quota.json"
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+  {
+    echo "window=fmses:fm-sms"
+    echo "endpoint_task_id=sms"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "account_codex=captain"
+    echo "codex_home=$stores/captain-codex"
+    echo "account_claude=captain"
+    echo "claude_config_dir=$stores/captain-claude"
+  } > "$home/state/sms.meta"
+  printf '%s\n' "fm-sms" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  # Work in flight in the home: neither store moves and nothing is measured.
+  printf 'kind=ship\n' > "$dir/smhome/state/lane.meta"
+  out=$(run_control "$dir" sms relaunch); rc=$?
+  expect_code 0 "$rc" "a busy secondmate should relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" sms codex_home)" = "$stores/captain-codex" ] \
+    || fail "a relaunch moved the codex store of a home with work in flight"
+  [ "$(meta_field "$dir" sms claude_config_dir)" = "$stores/captain-claude" ] \
+    || fail "a relaunch moved the claude store of a home with work in flight"
+  [ ! -s "$dir/fakebin/quota.log" ] || fail "a busy home's relaunch measured quota: $(cat "$dir/fakebin/quota.log")"
+
+  # Idle: only the drained codex store moves; claude keeps its headroom.
+  rm -f "$dir/smhome/state/lane.meta"
+  out=$(run_control "$dir" sms relaunch); rc=$?
+  expect_code 0 "$rc" "an idle secondmate should relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" sms account_codex)" = colleague ] \
+    || fail "an idle relaunch kept the drained codex account: $(cat "$home/state/sms.meta")"
+  [ "$(meta_field "$dir" sms codex_home)" = "$stores/colleague-codex" ] \
+    || fail "an idle relaunch did not record the re-resolved codex store"
+  [ "$(meta_field "$dir" sms account_claude)" = captain ] \
+    || fail "an idle relaunch moved the claude account that still had headroom"
+  [ "$(meta_field "$dir" sms claude_config_dir)" = "$stores/captain-claude" ] \
+    || fail "an idle relaunch moved the claude store that still had headroom"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$stores/colleague-codex'" \
+    "the relaunched secondmate was not launched on the re-resolved codex store"
+  pass "fm-control relaunch: an idle secondmate moves only a drained recorded store, a busy one keeps both"
+}
+
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
@@ -2817,6 +2910,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_claude_relaunch_keeps_local_settings
+test_idle_secondmate_relaunch_re_resolves_only_a_drained_store
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes

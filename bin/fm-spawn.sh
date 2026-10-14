@@ -111,7 +111,8 @@
 #   choice is per-dispatch rather than ambient, and it is recorded on the task
 #   record as account= (plus account_pin=yes when it was named explicitly, and
 #   account_codex=/codex_home=/account_claude=/claude_config_dir= on a
-#   secondmate home, which holds one store per vendor across relaunches).
+#   secondmate home, which holds one store per vendor across relaunches and
+#   re-resolves a drained one only while that home has no work in flight).
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2692,8 +2693,10 @@ ACCOUNT_PIN=no
 ACCOUNT_HOME_DEFAULT=0
 SM_CODEX_NAME=
 SM_CODEX_STORE=
+SM_CODEX_PIN=no
 SM_CLAUDE_NAME=
 SM_CLAUDE_STORE=
+SM_CLAUDE_PIN=no
 ACCOUNT_EVIDENCE=
 ACCOUNT_CHOOSER="$SCRIPT_DIR/fm-account-choose.sh"
 SECONDMATE_HOME_MARKER=0
@@ -2721,15 +2724,14 @@ account_chooser_field() {  # <chooser-output> <key>
   printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
 }
 
-# account_pin_resolves_here <vendor> <name>
-#   True when THIS home's own config/crew-accounts.json declares <name> with a
-#   store for <vendor> that resolves to an existing directory. A secondmate home
-#   does not inherit that host-local file, so an --account pin it cannot resolve
-#   there must not refuse the spawn; the home's own pinned store wins instead. A
-#   file that exists but cannot be read or parsed is left for the chooser to
-#   report, so a genuinely broken home config is never silently ignored.
-account_pin_resolves_here() {  # <vendor> <name>
-  local vendor=$1 name=$2 field raw resolved config_file
+# account_declared_store <vendor> <name>
+#   Prints the store THIS home's own config/crew-accounts.json declares for
+#   account <name> and <vendor>, with the schema's one ~ form expanded. Returns 1
+#   when the file is absent or declares no such store, and 2 when the file
+#   cannot be parsed or names a path the schema rejects, so a caller leaves that
+#   broken file for the chooser to report rather than silently ignoring it.
+account_declared_store() {  # <vendor> <name>
+  local vendor=$1 name=$2 field raw config_file
   config_file="$CONFIG/crew-accounts.json"
   [ -e "$config_file" ] || [ -L "$config_file" ] || return 1
   case "$vendor" in
@@ -2741,18 +2743,34 @@ account_pin_resolves_here() {  # <vendor> <name>
     [.accounts[]? | select(type == "object" and .name == $n)
       | select((.[$f] | type) == "string" and (.[$f] | length) > 0) | .[$f]]
     | first // empty
-  ' "$config_file" 2>/dev/null) || return 0
+  ' "$config_file" 2>/dev/null) || return 2
   [ -n "$raw" ] || return 1
   if [ "$raw" = '~' ]; then
-    resolved=${HOME:-}
+    printf '%s\n' "${HOME:-}"
   elif [ "${raw:0:2}" = "$(printf '~')/" ]; then
-    resolved="${HOME:-}${raw:1}"
+    printf '%s\n' "${HOME:-}${raw:1}"
   elif [ "${raw:0:1}" = '/' ]; then
-    resolved=$raw
+    printf '%s\n' "$raw"
   else
-    return 0
+    return 2
   fi
-  [ -d "$resolved" ]
+}
+
+# account_pin_resolves_here <vendor> <name>
+#   True when THIS home's own config/crew-accounts.json declares <name> with a
+#   store for <vendor> that resolves to an existing directory. A secondmate home
+#   does not inherit that host-local file, so an --account pin it cannot resolve
+#   there must not refuse the spawn; the home's own pinned store wins instead. A
+#   file that exists but cannot be read or parsed is left for the chooser to
+#   report, so a genuinely broken home config is never silently ignored.
+account_pin_resolves_here() {  # <vendor> <name>
+  local store rc=0
+  store=$(account_declared_store "$1" "$2") || rc=$?
+  case "$rc" in
+  0) [ -d "$store" ] ;;
+  2) return 0 ;;
+  *) return 1 ;;
+  esac
 }
 
 # account_home_identity <vendor>
@@ -2790,20 +2808,39 @@ account_home_identity() {  # <vendor>
   ACCOUNT_HOME_NAME=$(fm_meta_get "$record" "$name_field")
 }
 
-# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> <pin-optional:0|1> [<codex-model>]
+# account_resolved_from <vendor> <chooser-output> [<codex-model>]
+#   Sets ACCOUNT_RESOLVED_NAME, ACCOUNT_RESOLVED_STORE, ACCOUNT_RESOLVED_PIN,
+#   and ACCOUNT_RESOLVED_EVIDENCE from one chooser selection, leaving them
+#   untouched and returning 1 when the chooser selected nothing.
+account_resolved_from() {
+  local vendor=$1 out=$2 model=${3:-} name store advertised
+  name=$(account_chooser_field "$out" selected)
+  store=$(account_chooser_field "$out" store)
+  if [ -z "$name" ] || [ "$name" = none ]; then
+    return 1
+  fi
+  ACCOUNT_RESOLVED_NAME=$name
+  ACCOUNT_RESOLVED_STORE=$store
+  ACCOUNT_RESOLVED_PIN=$(account_chooser_field "$out" pin)
+  ACCOUNT_RESOLVED_EVIDENCE="account: vendor=$vendor account=$name store=$store measured=$(account_chooser_field "$out" measured) percent=$(account_chooser_field "$out" percent) runway=$(account_chooser_field "$out" runway) identity=$(account_chooser_field "$out" identity)"
+  if [ -n "$model" ]; then
+    advertised=$(account_chooser_field "$out" model_advertised)
+    ACCOUNT_RESOLVED_EVIDENCE="$ACCOUNT_RESOLVED_EVIDENCE model=$model model_advertised=${advertised:-unknown}"
+  fi
+  return 0
+}
+
+# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> [<codex-model>]
 #   Sets ACCOUNT_RESOLVED_NAME, ACCOUNT_RESOLVED_STORE, ACCOUNT_RESOLVED_PIN,
 #   ACCOUNT_RESOLVED_EVIDENCE. A codex model is forwarded to the chooser as
 #   --model, so each store's catalog evidence joins the selection. Returns 1
 #   (selecting nothing) when this vendor has no account to select, and refuses
 #   the whole spawn on a configuration error or when no configured account can
-#   be measured as usable. A pin is
-#   optional only for a caller resolving several vendors with one account name:
-#   where that account declares no store for this vendor, selection continues
-#   instead of refusing. Everywhere else a pin that cannot apply is refused
-#   rather than silently dropped.
+#   be measured as usable. A pin that cannot apply is refused rather than
+#   silently dropped.
 account_resolve() {
-  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 pin_optional=${6:-0} model=${7:-}
-  local out rc=0 args name store pin_used measured pct runway identity advertised
+  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 model=${6:-}
+  local out rc=0 args
   ACCOUNT_RESOLVED_NAME=
   ACCOUNT_RESOLVED_STORE=
   ACCOUNT_RESOLVED_PIN=no
@@ -2821,10 +2858,7 @@ account_resolve() {
   fi
   [ -n "$pin" ] || [ "$allow_auto" = 1 ] || return 1
   args=(--vendor "$vendor")
-  if [ -n "$pin" ]; then
-    args+=(--pin "$pin")
-    [ "$pin_optional" != 1 ] || args+=(--pin-optional)
-  fi
+  [ -z "$pin" ] || args+=(--pin "$pin")
   [ -z "$model" ] || args+=(--model "$model")
   out=$("$ACCOUNT_CHOOSER" "${args[@]}" 2>&1) || rc=$?
   if [ "$rc" -eq 3 ]; then
@@ -2836,22 +2870,89 @@ account_resolve() {
     printf '%s\n' "$out" >&2
     exit 1
   fi
-  name=$(account_chooser_field "$out" selected)
-  store=$(account_chooser_field "$out" store)
-  pin_used=$(account_chooser_field "$out" pin)
-  measured=$(account_chooser_field "$out" measured)
-  pct=$(account_chooser_field "$out" percent)
-  runway=$(account_chooser_field "$out" runway)
-  identity=$(account_chooser_field "$out" identity)
-  advertised=$(account_chooser_field "$out" model_advertised)
-  if [ -z "$name" ] || [ "$name" = none ]; then
-    return 1
+  account_resolved_from "$vendor" "$out" "$model"
+}
+
+# secondmate_home_idle <home>
+#   True only when <home> provably holds no task record of its own: its state
+#   directory is absent, or readable with no state/*.meta, which is the same
+#   in-flight test bin/fm-teardown.sh and bin/fm-control.sh's relaunch
+#   checkpoint apply to a secondmate home. A home that cannot be read is not
+#   provably idle.
+secondmate_home_idle() {  # <home>
+  local home=$1 meta
+  [ -n "$home" ] && [ -d "$home" ] || return 1
+  [ -e "$home/state" ] || [ -L "$home/state" ] || return 0
+  [ -d "$home/state" ] && [ -r "$home/state" ] && [ -x "$home/state" ] || return 1
+  for meta in "$home/state"/*.meta; do
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# secondmate_store_resolve <vendor> <record|''>
+#   Resolves one vendor's store for a secondmate launch; docs/configuration.md
+#   "Crew accounts" owns the contract. An --account declaring a store for
+#   <vendor> pins it. Otherwise a store the home's record already names is kept
+#   as is while the record marks it as an explicit pin or the home has work in
+#   flight, because that home's crewmates read the record on every launch. At
+#   the safe boundary - an idle home - the recorded account is measured first
+#   through the chooser's --prefer, so a store with headroom stays put and only
+#   a drained one moves to the account fill-first selection measures as usable.
+#   A vendor with no recorded store selects like a fresh dispatch. Sets
+#   ACCOUNT_RESOLVED_* as account_resolve does, SM_RESOLVED_PIN=yes for an
+#   explicit pin, and SM_PIN_APPLIED=1 once the --account applies to a vendor.
+secondmate_store_resolve() {  # <vendor> <record>
+  local vendor=$1 record=$2 name_field store_field recorded_name recorded_store declared out verdict rc=0
+  SM_RESOLVED_PIN=no
+  case "$vendor" in
+  codex) name_field=account_codex store_field=codex_home ;;
+  claude) name_field=account_claude store_field=claude_config_dir ;;
+  *) return 1 ;;
+  esac
+  if [ "$ACCOUNT_SET" -eq 1 ]; then
+    account_declared_store "$vendor" "$ACCOUNT_ARG" >/dev/null || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      SM_PIN_APPLIED=1
+      SM_RESOLVED_PIN=yes
+      account_resolve "$vendor" "$ACCOUNT_ARG" - - 1
+      return
+    fi
   fi
-  ACCOUNT_RESOLVED_NAME=$name
-  ACCOUNT_RESOLVED_STORE=$store
-  ACCOUNT_RESOLVED_PIN=$pin_used
-  ACCOUNT_RESOLVED_EVIDENCE="account: vendor=$vendor account=$name store=$store measured=$measured percent=$pct runway=$runway identity=$identity"
-  [ -z "$model" ] || ACCOUNT_RESOLVED_EVIDENCE="$ACCOUNT_RESOLVED_EVIDENCE model=$model model_advertised=${advertised:-unknown}"
+  recorded_store=$(fm_meta_get "$record" "$store_field")
+  if [ -z "$recorded_store" ]; then
+    account_resolve "$vendor" '' - - 1
+    return
+  fi
+  recorded_name=$(fm_meta_get "$record" "$name_field")
+  account_resolve "$vendor" '' "$recorded_name" "$recorded_store" 0 || return 1
+  if [ "$(fm_meta_get "$record" "${name_field}_pin")" = yes ]; then
+    SM_RESOLVED_PIN=yes
+    return 0
+  fi
+  secondmate_home_idle "$(fm_meta_get "$record" home)" || return 0
+  rc=0
+  declared=$(account_declared_store "$vendor" "$recorded_name") || rc=$?
+  if [ -z "$recorded_name" ] || [ "$rc" -ne 0 ] || [ "$declared" != "$recorded_store" ]; then
+    echo "notice: secondmate $ID keeps its recorded $vendor store $recorded_store, which this home's config/crew-accounts.json does not declare as account ${recorded_name:-(unnamed)}, so its headroom cannot be measured" >&2
+    return 0
+  fi
+  rc=0
+  out=$("$ACCOUNT_CHOOSER" --vendor "$vendor" --prefer "$recorded_name" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] || ! account_resolved_from "$vendor" "$out"; then
+    printf '%s\n' "$out" >&2
+    echo "notice: secondmate $ID keeps its recorded $vendor store $recorded_store because no $vendor account could be re-selected" >&2
+    return 0
+  fi
+  if [ "$ACCOUNT_RESOLVED_NAME" = "$recorded_name" ]; then
+    ACCOUNT_RESOLVED_EVIDENCE="$ACCOUNT_RESOLVED_EVIDENCE recorded=yes"
+    return 0
+  fi
+  verdict=$(printf '%s\n' "$out" | awk -v c="candidate=$recorded_name" '$1 == c { sub(/^.* -> (skipped:)?/, ""); print; exit }')
+  ACCOUNT_RESOLVED_EVIDENCE="$ACCOUNT_RESOLVED_EVIDENCE replaced=$recorded_name"
+  echo "notice: secondmate $ID moves its $vendor store off drained account $recorded_name (${verdict:-not usable}) to account $ACCOUNT_RESOLVED_NAME while its home is idle" >&2
   return 0
 }
 
@@ -2863,11 +2964,11 @@ if [ "$RAW_LAUNCH" = 1 ]; then
 else
   if [ "$KIND" = secondmate ]; then
     # A recovery respawn (bin/fm-bootstrap.sh's SECONDMATE_LIVENESS sweep runs
-    # `fm-spawn.sh <id> --secondmate` without --relaunch) reuses the home's own
-    # recorded per-vendor stores exactly like a relaunch, so a live home cannot
-    # drift between stores mid-flight. Only a record that is this home's own
-    # secondmate record is trusted; a foreign or stale record leaves a genuinely
-    # fresh creation resolving as it does today.
+    # `fm-spawn.sh <id> --secondmate` without --relaunch) resolves the home's own
+    # recorded per-vendor stores exactly like a relaunch (secondmate_store_resolve),
+    # so a home with work in flight cannot drift between stores. Only a record
+    # that is this home's own secondmate record is trusted; a foreign or stale
+    # record leaves a genuinely fresh creation resolving as it does today.
     sm_record_meta=$RELAUNCH_META
     if [ -z "$sm_record_meta" ] \
       && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } \
@@ -2879,18 +2980,23 @@ else
         sm_record_meta=$STATE/$ID.meta
       fi
     fi
-    SM_CODEX_RECORDED=$(fm_meta_get "$sm_record_meta" codex_home)
-    SM_CLAUDE_RECORDED=$(fm_meta_get "$sm_record_meta" claude_config_dir)
-    if account_resolve codex "$ACCOUNT_ARG" "$(fm_meta_get "$sm_record_meta" account_codex)" "$SM_CODEX_RECORDED" 1 1; then
+    SM_PIN_APPLIED=0
+    if secondmate_store_resolve codex "$sm_record_meta"; then
       SM_CODEX_NAME=$ACCOUNT_RESOLVED_NAME
       SM_CODEX_STORE=$ACCOUNT_RESOLVED_STORE
+      SM_CODEX_PIN=$SM_RESOLVED_PIN
       ACCOUNT_EVIDENCE=$ACCOUNT_RESOLVED_EVIDENCE
     fi
-    if account_resolve claude "$ACCOUNT_ARG" "$(fm_meta_get "$sm_record_meta" account_claude)" "$SM_CLAUDE_RECORDED" 1 1; then
+    if secondmate_store_resolve claude "$sm_record_meta"; then
       SM_CLAUDE_NAME=$ACCOUNT_RESOLVED_NAME
       SM_CLAUDE_STORE=$ACCOUNT_RESOLVED_STORE
+      SM_CLAUDE_PIN=$SM_RESOLVED_PIN
       ACCOUNT_EVIDENCE="${ACCOUNT_EVIDENCE:+$ACCOUNT_EVIDENCE
 }$ACCOUNT_RESOLVED_EVIDENCE"
+    fi
+    if [ "$ACCOUNT_SET" -eq 1 ] && [ "$SM_PIN_APPLIED" -eq 0 ]; then
+      echo "error: --account $ACCOUNT_ARG declares no codex or claude store in $CONFIG/crew-accounts.json" >&2
+      exit 1
     fi
   else
     ACCOUNT_VENDOR=$(account_vendor_for_harness "$HARNESS") || ACCOUNT_VENDOR=
@@ -2928,7 +3034,7 @@ else
       if [ "$ACCOUNT_VENDOR" = codex ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
         ACCOUNT_MODEL=$MODEL
       fi
-      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" "$ACCOUNT_HOME_RECORDED_NAME" "$ACCOUNT_HOME_RECORDED_STORE" "$ACCOUNT_ALLOW_AUTO" 0 "$ACCOUNT_MODEL"; then
+      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" "$ACCOUNT_HOME_RECORDED_NAME" "$ACCOUNT_HOME_RECORDED_STORE" "$ACCOUNT_ALLOW_AUTO" "$ACCOUNT_MODEL"; then
         ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME
         ACCOUNT_STORE=$ACCOUNT_RESOLVED_STORE
         ACCOUNT_PIN=$ACCOUNT_RESOLVED_PIN
@@ -5633,7 +5739,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent model effort account account_pin account_provider account_codex codex_home account_claude claude_config_dir busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent model effort account account_pin account_provider account_codex codex_home account_codex_pin account_claude claude_config_dir account_claude_pin busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5702,14 +5808,17 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
     # A secondmate home's per-vendor stores, so every relaunch puts the home
-    # back on the same account rather than letting it drift to another one.
+    # back on the same account rather than letting it drift to another one;
+    # account_<vendor>_pin=yes marks an explicit --account, never re-resolved.
     if [ -n "$SM_CODEX_STORE" ]; then
       [ -z "$SM_CODEX_NAME" ] || echo "account_codex=$SM_CODEX_NAME"
       echo "codex_home=$SM_CODEX_STORE"
+      [ "$SM_CODEX_PIN" != yes ] || echo "account_codex_pin=yes"
     fi
     if [ -n "$SM_CLAUDE_STORE" ]; then
       [ -z "$SM_CLAUDE_NAME" ] || echo "account_claude=$SM_CLAUDE_NAME"
       echo "claude_config_dir=$SM_CLAUDE_STORE"
+      [ "$SM_CLAUDE_PIN" != yes ] || echo "account_claude_pin=yes"
     fi
   fi
   if [ "$RELAUNCH" -eq 1 ]; then

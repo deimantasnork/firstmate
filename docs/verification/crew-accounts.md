@@ -78,4 +78,5 @@ bin/fm-test-run.sh tests/fm-account-choose.test.sh
 bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The first pins the declaration order, the reserve and a closed 100 percent reserve, the pin and optional-pin paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's pinned stores across a recovery respawn, that home's crewmates running on its recorded or own-file stores rather than an ambient one, and the refusal before any record is published.
+The first pins the declaration order, the reserve and a closed 100 percent reserve, the pin and preferred-account paths, the unmeasurable and unparseable cases, the per-store probe, and the configuration refusals against a fake `quota-axi`; the second pins the store forwarding, the task-record fields, a secondmate home's recorded stores across a recovery respawn - kept while the home has work in flight or the store carries an explicit pin, and re-resolved per vendor only when drained at an idle boundary - that home's crewmates running on its recorded or own-file stores rather than an ambient one, and the refusal before any record is published.
+`tests/fm-control-relaunch.test.sh` pins the same safe boundary through the relaunch verb.

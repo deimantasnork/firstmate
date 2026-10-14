@@ -2301,7 +2301,6 @@ install_quota_axi_fake() {  # <fakebin> <log>
   cat > "$1/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "${FM_FAKE_QUOTA_LOG:-}" ]; then printf '%s\n' "$*" >> "$FM_FAKE_QUOTA_LOG"; fi
 provider=
 case "${1:-}" in
   --provider) provider=${2:-} ;;
@@ -2310,8 +2309,9 @@ esac
 case "$provider" in
   codex) store=${CODEX_HOME:-} ;;
   claude) store=${CLAUDE_CONFIG_DIR:-} ;;
-  *) exit 2 ;;
+  *) store= ;;
 esac
+if [ "${FM_FAKE_QUOTA_LOG:-}" ]; then printf '%s store=%s\n' "$*" "$store" >> "$FM_FAKE_QUOTA_LOG"; fi
 [ -n "$store" ] || exit 2
 [ -f "$store/.fm-quota.json" ] || { printf 'no quota fixture at %s\n' "$store" >&2; exit 2; }
 cat "$store/.fm-quota.json"
@@ -2886,7 +2886,9 @@ test_secondmate_recovery_respawn_reuses_the_recorded_stores() {
 
   # The captain's accounts read healthy again, but a recovery respawn
   # (bin/fm-bootstrap.sh's SECONDMATE_LIVENESS sweep: no --relaunch and no home
-  # positional) must keep the home on the stores its own record already holds.
+  # positional) must keep the home on the stores its own record already holds
+  # while they still have headroom, even though fill-first alone would now
+  # prefer the first codex account again.
   write_account_store "$codex_a" "$(account_store_json codex 100 through_reset)"
   : > "$CASE_DIR/quota.log"
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate)
@@ -2897,8 +2899,160 @@ test_secondmate_recovery_respawn_reuses_the_recorded_stores() {
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$claude_a'" "the recovery respawn re-selected the claude store"
   assert_grep "codex_home=$codex_b" "$meta" "the recovery respawn rewrote the home's codex store"
   assert_grep "claude_config_dir=$claude_a" "$meta" "the recovery respawn rewrote the home's claude store"
-  [ ! -s "$CASE_DIR/quota.log" ] || fail "the recovery respawn probed the account stores: $(cat "$CASE_DIR/quota.log")"
-  pass "a secondmate recovery respawn keeps the home's recorded stores without re-selecting"
+  assert_contains "$out" "account: vendor=codex account=secondary store=$codex_b measured=yes percent=87" \
+    "the recovery respawn did not report the recorded codex store's measured headroom"
+  assert_not_contains "$(cat "$CASE_DIR/quota.log")" "store=$codex_a" "the recovery respawn measured an account it did not run on"
+  assert_not_contains "$(cat "$CASE_DIR/quota.log")" "store=$claude_b" "the recovery respawn measured an account it did not run on"
+  pass "a secondmate recovery respawn keeps recorded stores that still have headroom without re-selecting"
+}
+
+# The four cases below pin the safe-boundary re-resolve (docs/configuration.md
+# "Crew accounts"): a drained recorded store moves only while the home is idle,
+# one vendor at a time, and never when it was pinned explicitly.
+
+secondmate_store_case() {  # <name> <id> [spawn-args...]
+  local name=$1 id=$2 rec
+  shift 2
+  rec=$(make_spawn_case "$name" codex "$id")
+  read_case_record "$rec"
+  SM_HOME="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$SM_HOME" "$id"
+  CODEX_A="$CASE_DIR/store-codex-a"
+  CODEX_B="$CASE_DIR/store-codex-b"
+  CLAUDE_A="$CASE_DIR/store-claude-a"
+  CLAUDE_B="$CASE_DIR/store-claude-b"
+  write_account_store "$CODEX_A" "$(account_store_json codex 60 through_reset)"
+  write_account_store "$CODEX_B" "$(account_store_json codex 87 through_reset)"
+  write_account_store "$CLAUDE_A" "$(account_store_json claude 70 through_reset)"
+  write_account_store "$CLAUDE_B" "$(account_store_json claude 90 through_reset)"
+  write_accounts_config "$HOME_DIR" "$CODEX_A" "$CODEX_B" "$CLAUDE_A" "$CLAUDE_B"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  SM_OUT=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$SM_HOME" --secondmate "$@")
+  expect_code 0 "$?" "the secondmate's first spawn should succeed"$'\n'"$SM_OUT"
+  : > "$CASE_DIR/quota.log"
+}
+
+secondmate_respawn() {  # <id> [spawn-args...]
+  local id=$1
+  shift
+  SM_OUT=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate "$@")
+}
+
+test_idle_secondmate_moves_only_its_drained_store() {
+  local id meta launch status
+  id=account-secondmate-drained-z9q
+  secondmate_store_case account-secondmate-drained "$id"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account_codex=primary" "$meta" "the first spawn did not record the first codex account"
+  assert_grep "account_claude=primary" "$meta" "the first spawn did not record the first claude account"
+
+  # The recorded codex account drains while its claude account keeps headroom.
+  write_account_store "$CODEX_A" "$(account_store_json codex 0 exhausted_now)"
+  secondmate_respawn "$id"
+  status=$?
+  expect_code 0 "$status" "an idle secondmate's respawn should succeed"$'\n'"$SM_OUT"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$CODEX_B'" "the drained codex store was not re-resolved"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CLAUDE_A'" "the claude store with headroom moved with the codex one"
+  assert_grep "account_codex=secondary" "$meta" "the re-resolved codex account was not recorded"
+  assert_grep "codex_home=$CODEX_B" "$meta" "the re-resolved codex store was not recorded"
+  assert_grep "account_claude=primary" "$meta" "the claude account was rewritten"
+  assert_grep "claude_config_dir=$CLAUDE_A" "$meta" "the claude store was rewritten"
+  assert_no_grep "_pin=" "$meta" "an automatic re-resolve was recorded as an explicit pin"
+  assert_contains "$SM_OUT" "moves its codex store off drained account primary (runway exhausted_now at all_models) to account secondary" \
+    "the move did not name the drained account and its evidence: $SM_OUT"
+  assert_contains "$SM_OUT" "account: vendor=codex account=secondary store=$CODEX_B measured=yes percent=87" \
+    "the move did not report the new store's evidence: $SM_OUT"
+  assert_not_contains "$SM_OUT" "moves its claude store" "the claude store was reported as moved: $SM_OUT"
+  assert_not_contains "$(cat "$CASE_DIR/quota.log")" "store=$CLAUDE_B" "the claude account with headroom was re-selected"
+  pass "an idle secondmate re-resolves only the vendor whose recorded store drained"
+}
+
+test_secondmate_with_work_in_flight_keeps_its_drained_store() {
+  local id meta launch status
+  id=account-secondmate-busy-z9r
+  secondmate_store_case account-secondmate-busy "$id"
+  meta="$HOME_DIR/state/$id.meta"
+  write_account_store "$CODEX_A" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$CLAUDE_A" "$(account_store_json claude 0 exhausted_now)"
+  # One task record in the home is work in flight whose relaunch reads this record.
+  mkdir -p "$SM_HOME/state"
+  printf 'kind=ship\n' > "$SM_HOME/state/child-lane.meta"
+
+  secondmate_respawn "$id"
+  status=$?
+  expect_code 0 "$status" "a busy secondmate's respawn should succeed"$'\n'"$SM_OUT"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$CODEX_A'" "a home with work in flight moved its codex store"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CLAUDE_A'" "a home with work in flight moved its claude store"
+  assert_grep "codex_home=$CODEX_A" "$meta" "a home with work in flight had its codex store rewritten"
+  assert_grep "claude_config_dir=$CLAUDE_A" "$meta" "a home with work in flight had its claude store rewritten"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "a home with work in flight probed account quota: $(cat "$CASE_DIR/quota.log")"
+
+  # Once the home is idle again the same respawn moves both drained stores.
+  rm -f "$SM_HOME/state/child-lane.meta"
+  secondmate_respawn "$id"
+  status=$?
+  expect_code 0 "$status" "the idle respawn should succeed"$'\n'"$SM_OUT"
+  assert_grep "codex_home=$CODEX_B" "$meta" "the drained codex store stayed once the home was idle"
+  assert_grep "claude_config_dir=$CLAUDE_B" "$meta" "the drained claude store stayed once the home was idle"
+  pass "a secondmate with work in flight keeps its recorded stores until its home is idle"
+}
+
+test_explicitly_pinned_secondmate_store_is_never_re_resolved() {
+  local id meta launch status
+  id=account-secondmate-pinned-z9s
+  secondmate_store_case account-secondmate-pinned "$id" --account primary
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account_codex_pin=yes" "$meta" "the explicit codex pin was not recorded"
+  assert_grep "account_claude_pin=yes" "$meta" "the explicit claude pin was not recorded"
+
+  write_account_store "$CODEX_A" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$CLAUDE_A" "$(account_store_json claude 0 exhausted_now)"
+  secondmate_respawn "$id"
+  status=$?
+  expect_code 0 "$status" "a pinned secondmate's respawn should succeed"$'\n'"$SM_OUT"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$CODEX_A'" "an explicitly pinned codex store was re-resolved"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CLAUDE_A'" "an explicitly pinned claude store was re-resolved"
+  assert_grep "account_codex_pin=yes" "$meta" "the respawn dropped the explicit codex pin"
+  assert_grep "account_claude_pin=yes" "$meta" "the respawn dropped the explicit claude pin"
+  [ "$(grep -c '^account_codex_pin=' "$meta")" -eq 1 ] || fail "the codex pin marker was duplicated: $(cat "$meta")"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "a pinned home probed account quota: $(cat "$CASE_DIR/quota.log")"
+  pass "an explicit --account pin on a secondmate is never re-resolved"
+}
+
+test_one_vendor_pin_leaves_the_other_recorded_store_in_place() {
+  local id meta launch status codex_c
+  id=account-secondmate-one-pin-z9t
+  secondmate_store_case account-secondmate-one-pin "$id"
+  meta="$HOME_DIR/state/$id.meta"
+  codex_c="$CASE_DIR/store-codex-c"
+  write_account_store "$codex_c" "$(account_store_json codex 10 through_reset)"
+  jq --arg c "$codex_c" '.accounts += [{name: "codex-only", codex_home: $c}]' \
+    "$HOME_DIR/config/crew-accounts.json" > "$CASE_DIR/accounts.json"
+  mv "$CASE_DIR/accounts.json" "$HOME_DIR/config/crew-accounts.json"
+  write_account_store "$CLAUDE_A" "$(account_store_json claude 0 exhausted_now)"
+  mkdir -p "$SM_HOME/state"
+  printf 'kind=ship\n' > "$SM_HOME/state/child-lane.meta"
+
+  # The pin names no claude store, so claude resolves exactly as without it:
+  # with work in flight its drained recorded store stays where it is.
+  secondmate_respawn "$id" --account codex-only
+  status=$?
+  expect_code 0 "$status" "a one-vendor pin on a busy secondmate should succeed"$'\n'"$SM_OUT"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_c'" "the codex pin was not applied"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CLAUDE_A'" "a pin naming no claude store moved the claude store"
+  assert_grep "account_codex_pin=yes" "$meta" "the codex pin was not recorded as one"
+  assert_grep "claude_config_dir=$CLAUDE_A" "$meta" "the claude store was rewritten by a codex-only pin"
+  assert_no_grep "account_claude_pin=" "$meta" "the claude store was recorded as pinned"
+  assert_not_contains "$(cat "$CASE_DIR/quota.log")" "--provider claude" "a codex-only pin probed the claude accounts"
+
+  secondmate_respawn "$id" --account nobody
+  expect_code 1 "$?" "an --account naming no store must refuse"$'\n'"$SM_OUT"
+  assert_contains "$SM_OUT" "--account nobody declares no codex or claude store" "the refusal did not explain itself: $SM_OUT"
+  pass "a pin naming one vendor's store leaves the other vendor's recorded store in place"
 }
 
 test_no_eligible_account_refuses_before_any_record_is_published() {
@@ -3013,6 +3167,10 @@ test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve
 test_secondmate_home_refuses_a_recorded_store_that_is_gone
 test_secondmate_spawn_records_one_store_per_vendor
 test_secondmate_recovery_respawn_reuses_the_recorded_stores
+test_idle_secondmate_moves_only_its_drained_store
+test_secondmate_with_work_in_flight_keeps_its_drained_store
+test_explicitly_pinned_secondmate_store_is_never_re_resolved
+test_one_vendor_pin_leaves_the_other_recorded_store_in_place
 test_no_eligible_account_refuses_before_any_record_is_published
 test_a_pin_needs_a_selection_capable_harness
 
