@@ -837,6 +837,41 @@ test_build_persists_decision_cards_durably() {
   pass "build persists the effective decision cards for later readers"
 }
 
+# The bearings skill forbids two cards for one task id, so the store writer is
+# the last line of defense: a file that carries two JSON documents makes a
+# later reader refuse the whole record. Exactly one card per key is written.
+# The first payload entry wins because it is the composer's primary card; the
+# entries after it are the mirror duplicates.
+test_build_persists_one_store_card_for_a_duplicated_call_key() {
+  local home data store key documents
+  home=$(make_home duplicate-cards)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+
+  if ! jq --arg key "$key" '
+    .captains_call += [.captains_call[] | select(.key == $key) | .title = "Mirrored copy"]' \
+    "$data" > "$data.next"; then
+    fail "could not stage the duplicated-call payload"
+  fi
+  mv "$data.next" "$data" || fail "could not stage the duplicated-call payload"
+  [ "$(jq -c --arg key "$key" '[.captains_call[] | select(.key == $key)] | length' "$data")" = 2 ] \
+    || fail "the fixture payload does not carry the duplicated key twice"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "a payload with a duplicated call key did not build"
+  assert_present "$store/$key.json" "the duplicated call key persisted no card"
+  documents=$(jq -c '1' "$store/$key.json" | wc -l | tr -d ' ')
+  [ "$documents" = 1 ] \
+    || fail "the store card holds $documents JSON documents; a later reader needs exactly one"
+  jq -e '.schema == "fm-decision-card.v1"' "$store/$key.json" >/dev/null \
+    || fail "the store card is not an fm-decision-card.v1 record"
+  [ "$(jq -r '.card.title' "$store/$key.json")" = "Perishable-first admission" ] \
+    || fail "the store card is not the first payload entry for the key"
+  pass "build persists exactly one store card for a duplicated captain-call key"
+}
+
 test_build_merges_the_durable_card_store_first() {
   local home data store key
   home=$(make_home store-first)
@@ -982,6 +1017,7 @@ test_refresh_refuses_a_broken_snapshot_before_touching_the_board() {
 
 test_path_is_stable_and_home_scoped
 test_build_persists_decision_cards_durably
+test_build_persists_one_store_card_for_a_duplicated_call_key
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
