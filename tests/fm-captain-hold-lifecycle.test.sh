@@ -1514,6 +1514,295 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+# A stub tmux whose panes read as idle and empty, so a doorbell always submits,
+# and which records every literal line typed into a pane in
+# <fakebin>/doorbell.log. <fakebin>/doorbell.window names the one window it
+# reports, so fm-send resolves the lane's recorded endpoint.
+install_doorbell_tmux() {  # <fakebin> <window-name>
+  local fakebin=$1
+  printf '%s\n' "$2" > "$fakebin/doorbell.window"
+  : > "$fakebin/doorbell.log"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+here=$(cd "$(dirname "$0")" && pwd)
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    [ "$literal" = 0 ] || printf '%s\n' "${1:-}" >> "$here/doorbell.log"
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) cat "$here/doorbell.window"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" sleep
+}
+
+# A secondmate home <mate-id> bound to <parent> by <route>, with a doorbell
+# tmux. The caller records the lane endpoint the route keeps.
+make_mate_home() {  # <name> <mate-id> <parent-or-empty> <local|remote>
+  local mate="$TMP_ROOT/$1" fakebin
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  fm_test_tasks_toml "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf '%s\n' "$2" > "$mate/.fm-secondmate-home"
+  if [ "$4" = local ]; then
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$3" \
+      > "$mate/.fm-secondmate-parent"
+  else
+    printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$mate/.fm-secondmate-parent"
+  fi
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
+  install_doorbell_tmux "$fakebin" "fm-$2"
+  printf '%s\n' "$mate"
+}
+
+hold_with_release_card() {  # <home> <task-id>
+  tasks_in "$1" add "$2" "Ship $2" --kind ship --repo sample >/dev/null \
+    || fail "could not create $2"
+  run_captain "$1" hold "$2" --reason "captain go needed for $2" \
+    --card-title "Go for $2" --option "go:Go" --option "wait:Wait" --close release >/dev/null \
+    || fail "could not raise the card for $2"
+  assert_present "$1/state/decision-cards/$2.json" "hold did not write the card for $2"
+}
+
+# How the parent's own fold reads one key, through the classifier it uses.
+channel_key_verb() {  # <status-file> <key>
+  bash -c '. "$1"; status_key_closing_verb "$2" "$3"' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2"
+}
+
+lane_records() {  # <inbox-dir>
+  find "$1" -name '*.msg' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+# One deck answer in a main home takes effect at once: the card leaves the
+# store the deck reads live and the home's own session is woken through its
+# captain inbox, while an unrelated open hold keeps its card and its hold. A
+# replay of either intake path changes nothing, including after the session
+# acknowledged the wake.
+test_deck_answer_retires_the_card_and_wakes_a_main_home() {
+  local home a b c out queue note
+  home=$(make_home deck-answer-main)
+  a=sample-deck-release
+  b=sample-deck-unrelated
+  c=sample-direct-release
+  hold_with_release_card "$home" "$a"
+  hold_with_release_card "$home" "$b"
+  hold_with_release_card "$home" "$c"
+
+  out=$(printf '%s\tgo\tGo\trelease\n' "$a" \
+    | run_captain "$home" answers --source "deck fixture" 2>&1) \
+    || fail "the deck answer was refused: $out"
+  assert_contains "$out" "closed: $a" "the deck answer did not release $a"
+  assert_contains "$(tasks_in "$home" show "$a" --full)" "held: no" "the deck answer kept the hold"
+  assert_absent "$home/state/decision-cards/$a.json" "the answered call kept its card in the deck's store"
+  [ "$(grep -lF "held call $a (released)" "$home/state/inbox"/*.note | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the deck answer did not leave exactly one captain-inbox wake for $a"
+  [ "$(grep -cF "Captain answer recorded for held call $a (released)" "$home/state/.wake-queue")" = 1 ] \
+    || fail "the deck answer did not queue exactly one wake for $a: $(cat "$home/state/.wake-queue")"
+  note=$(grep -lF "held call $a (released)" "$home/state/inbox"/*.note)
+  assert_grep "Answer: go" "$note" "the wake did not carry the recorded answer"
+  assert_present "$home/state/decision-cards/$b.json" "an unrelated answer retired an open call's card"
+  assert_contains "$(tasks_in "$home" show "$b" --full)" "held: yes" "an unrelated answer released an open hold"
+  ! grep -qF "$b" "$home/state/inbox"/*.note || fail "an unrelated answer woke the home about $b"
+
+  queue=$(cat "$home/state/.wake-queue")
+  out=$(printf '%s\tgo\tGo\trelease\n' "$a" \
+    | run_captain "$home" answers --source "deck fixture" 2>&1) \
+    || fail "the deck answer replay was refused: $out"
+  assert_contains "$out" "closed: $a" "the deck answer replay was not idempotent"
+  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "a replayed deck answer woke the home again"
+  [ "$(find "$home/state/inbox" -name '*.note' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a replayed deck answer left a second inbox note"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-inbox.sh" drain \
+    --ack "$(basename "$note" .note)" >/dev/null || fail "could not acknowledge the wake"
+  printf '%s\tgo\tGo\trelease\n' "$a" \
+    | run_captain "$home" answers --source "deck fixture" >/dev/null 2>&1 \
+    || fail "the replay after acknowledgement was refused"
+  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "a replay after acknowledgement woke the home again"
+  [ "$(find "$home/state/inbox" -name '*.note' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a replay after acknowledgement left a new inbox note"
+
+  printf 'Go now.\n' > "$home/go.txt"
+  run_captain "$home" answer "$c" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed"
+  assert_absent "$home/state/decision-cards/$c.json" "answer --release kept the card"
+  [ "$(grep -cF "Captain answer recorded for held call $c (released)" "$home/state/.wake-queue")" = 1 ] \
+    || fail "answer --release did not wake the home exactly once"
+  queue=$(cat "$home/state/.wake-queue")
+  run_captain "$home" answer "$c" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "the answer --release retry was not idempotent"
+  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "an answer --release retry woke the home again"
+  assert_present "$home/state/decision-cards/$b.json" "the unrelated open call lost its card"
+  pass "a deck answer retires its card and wakes a main home once; replays and other holds stay untouched"
+}
+
+# The session that holds a home's lock is the one a wake would reach, so when
+# it records the answer itself nothing is queued for it. The lock is attributed
+# to this process's own harness ancestry, which exists only when a verified
+# harness runs the suite.
+test_answer_from_the_owning_session_wakes_nobody() {
+  local home id pids lock_pid
+  pids=$(bash -c '. "$1"; fm_harness_ancestry_pids' _ "$ROOT/bin/fm-session-lock-lib.sh" 2>/dev/null || true)
+  lock_pid=$(printf '%s\n' "$pids" | sed '/^$/d' | tail -n 1)
+  if [ -z "$lock_pid" ]; then
+    pass "skipped: no verified harness in this run's ancestry to hold the fixture's session lock"
+    return 0
+  fi
+  home=$(make_home answer-owning-session)
+  id=sample-session-answer
+  hold_with_release_card "$home" "$id"
+  printf '%s\n' "$lock_pid" > "$home/state/.lock"
+  printf 'Go.\n' > "$home/go.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "the owning session's answer failed"
+  assert_absent "$home/state/decision-cards/$id.json" "the owning session's answer kept the card"
+  [ ! -e "$home/state/inbox" ] || [ -z "$(find "$home/state/inbox" -name '*.note')" ] \
+    || fail "the owning session's own answer queued a wake for itself"
+  pass "an answer recorded by the session holding the home's lock wakes nobody"
+}
+
+# The relayed secondmate case: a deck answer recorded in the mate's own home
+# publishes its resolved line on the parent channel, retires the mate's card,
+# and wakes the mate itself through the steering lane its parent steers it
+# through, with one doorbell. Replays publish, retire, and ring nothing - also
+# after the mate acknowledged the wake - and the mate's other open hold keeps
+# its card and its open parent decision.
+test_secondmate_deck_answer_publishes_retires_and_wakes_its_home() {
+  local parent mate id other channel lane out rec
+  parent=$(make_home deck-answer-parent)
+  mate=$(make_mate_home deck-answer-mate deck-mate "$parent" local)
+  fm_write_secondmate_meta "$parent/state/deck-mate.meta" "$mate" "sess:fm-deck-mate" sample claude
+  channel="$parent/state/deck-mate.status"
+  lane="$parent/state/deck-mate.inbox"
+  id=sample-renumber
+  other=sample-other-call
+  hold_with_release_card "$mate" "$id"
+  hold_with_release_card "$mate" "$other"
+  assert_grep "needs-decision [key=captain-hold-$id-1]" "$channel" "the mate's hold did not reach its parent"
+
+  out=$(printf '%s\trenumber\tRenumber\trelease\n' "$id" \
+    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" 2>&1) \
+    || fail "the relayed deck answer was refused: $out"
+  assert_contains "$out" "closed: $id" "the relayed deck answer did not release the hold"
+  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 1 ] \
+    || fail "the answer did not publish exactly one resolved line: $(cat "$channel")"
+  assert_absent "$mate/state/decision-cards/$id.json" "the answered call kept its card in the mate's store"
+  rec="$lane/001.msg"
+  assert_present "$rec" "the answer did not wake the mate through its steering lane"
+  assert_grep "delivery=fire-and-forget" "$rec" "the lane wake is not a fire-and-forget record"
+  assert_grep "held call $id (released)" "$rec" "the lane wake does not name the released call"
+  assert_grep "Answer: renumber" "$rec" "the lane wake does not carry the recorded answer"
+  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
+    || fail "the lane wake did not ring the mate exactly once: $(cat "$mate/fakebin/doorbell.log")"
+  assert_present "$mate/state/decision-cards/$other.json" "the unrelated open call lost its card"
+  assert_no_grep "resolved [key=captain-hold-$other-" "$channel" "the unrelated open call was resolved"
+  assert_no_grep "$other" "$rec" "the lane wake named the unrelated open call"
+
+  out=$(printf '%s\trenumber\tRenumber\trelease\n' "$id" \
+    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" 2>&1) \
+    || fail "the relayed deck answer replay was refused: $out"
+  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 1 ] \
+    || fail "a replay published a second resolved line: $(cat "$channel")"
+  [ "$(lane_records "$lane")" = 1 ] || fail "a replay woke the mate a second time"
+  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] || fail "a replay rang the mate again"
+  mv "$rec" "$lane/handled/"
+  printf '%s\trenumber\tRenumber\trelease\n' "$id" \
+    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" >/dev/null 2>&1 \
+    || fail "the replay after acknowledgement was refused"
+  [ "$(lane_records "$lane")" = 1 ] || fail "a replay after acknowledgement woke the mate again"
+  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
+    || fail "a replay after acknowledgement rang the mate again"
+  assert_present "$mate/state/decision-cards/$other.json" "a replay retired the unrelated card"
+  pass "a relayed deck answer publishes once, retires the card, and wakes the owning mate once"
+}
+
+# A re-held call whose earlier answer was rewritten out of its task body
+# reuses its parent key, so the new episode's lines repeat an earlier
+# episode's text; the parent channel must still see the call open and then
+# closed. This is the 2026-10-09 letspadel-ui-keyed-analytics-id gap, where the
+# second "released" line read as a retry of the first and the parent kept a
+# call the captain had already answered.
+test_reheld_call_with_a_rewritten_body_still_closes_its_parent_decision() {
+  local parent mate id channel out answer
+  parent=$(make_home rehold-parent)
+  mate=$(make_mate_home rehold-mate rehold-mate "$parent" local)
+  fm_write_secondmate_meta "$parent/state/rehold-mate.meta" "$mate" "sess:fm-rehold-mate" sample claude
+  channel="$parent/state/rehold-mate.status"
+  id=sample-reheld-work
+  tasks_in "$mate" add "$id" "Ship the reheld work" --kind ship --repo sample >/dev/null \
+    || fail "could not create the reheld fixture"
+  run_captain "$mate" hold "$id" --reason "captain build choice needed" >/dev/null \
+    || fail "first hold failed"
+  printf '%s\tbuild\t\trelease\n' "$id" | run_captain "$mate" answers --source "deck one" >/dev/null 2>&1 \
+    || fail "first answer failed"
+  printf 'Dispatched work body; earlier answers live in the archived body.\n' > "$mate/body.txt"
+  # Episode two is the incident: a different reason opens the reused key, and
+  # the answer's resolved line repeats episode one's text exactly.
+  # Episode three repeats episode two's reason too, so its opening line
+  # repeats an earlier one as well.
+  for answer in merge ship; do
+    tasks_in "$mate" update "$id" --body-file "$mate/body.txt" >/dev/null \
+      || fail "could not rewrite the body"
+    run_captain "$mate" hold "$id" --reason "captain merge approval needed" >/dev/null \
+      || fail "re-hold failed before the $answer answer"
+    [ "$(channel_key_verb "$channel" "captain-hold-$id-1")" = needs-decision ] \
+      || fail "the re-held call did not reopen its parent decision: $(cat "$channel")"
+    out=$(printf '%s\t%s\t\trelease\n' "$id" "$answer" \
+      | run_captain "$mate" answers --source "deck $answer" 2>&1) \
+      || fail "the $answer answer failed: $out"
+    [ "$(channel_key_verb "$channel" "captain-hold-$id-1")" = resolved ] \
+      || fail "the $answer answer's resolved line was swallowed as a retry: $(cat "$channel")"
+  done
+  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 3 ] \
+    || fail "each episode did not close exactly once: $(cat "$channel")"
+  [ -z "$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")" ] \
+    || fail "the parent still folds an answered call open: $(cat "$channel")"
+  pass "a re-held call with a rewritten body still closes its parent decision"
+}
+
+# A remote secondmate's lane lives host-local in its own state/parent-route,
+# and its parent channel in its own state/parent-replies.status.
+test_remote_secondmate_answer_wakes_its_host_local_lane() {
+  local mate id lane out
+  mate=$(make_mate_home remote-answer-mate remote-mate "" remote)
+  mkdir -p "$mate/state/parent-route"
+  fm_write_secondmate_meta "$mate/state/parent-route/remote-mate.meta" "$mate" \
+    "sess:fm-remote-mate" sample claude
+  lane="$mate/state/parent-route/remote-mate.inbox"
+  id=sample-remote-call
+  hold_with_release_card "$mate" "$id"
+  out=$(printf '%s\tgo\tGo\trelease\n' "$id" | run_captain "$mate" answers --source "deck" 2>&1) \
+    || fail "the remote mate's answer was refused: $out"
+  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$mate/state/parent-replies.status")" = 1 ] \
+    || fail "the remote mate's answer did not reach its parent channel"
+  assert_absent "$mate/state/decision-cards/$id.json" "the remote mate kept the answered card"
+  assert_grep "held call $id (released)" "$lane/001.msg" "the remote mate's lane was not woken"
+  [ "$(grep -cF "remote-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
+    || fail "the remote mate was not rung exactly once"
+  pass "a remote secondmate's answer wakes its host-local lane"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -4348,8 +4637,8 @@ test_card_rewrites_an_open_call_and_a_rehold_preserves_it() {
   pass "card rewrites an open call and a re-hold preserves the stored copy"
 }
 
-# A card belongs to a live call: once the call is answered, `card` refuses and
-# the stored record the captain was shown stays untouched.
+# A card belongs to a live call: the answer retires it from the store, and
+# `card` then refuses rather than writing one for the closed call.
 test_card_refuses_a_closed_call() {
   local home store out rc
   home=$(make_home card-closed)
@@ -4360,6 +4649,7 @@ test_card_refuses_a_closed_call() {
   printf 'Go with A.\n' > "$home/go.txt"
   run_captain "$home" answer sample-closed-card --decision-file "$home/go.txt" >/dev/null \
     || fail "answer failed on the card fixture"
+  assert_absent "$store" "the answer left the closed call's card in the store the deck reads"
   set +e
   out=$(run_captain "$home" card sample-closed-card --card-title "Late copy" \
     --option "b:Option B" 2>&1)
@@ -4368,9 +4658,8 @@ test_card_refuses_a_closed_call() {
   [ "$rc" -ne 0 ] || fail "card accepted a call that is no longer open"
   assert_contains "$out" "not an open captain call" \
     "the closed-call refusal did not name the reason: $out"
-  jq -e '.card.title == "Shown copy"' "$store" >/dev/null \
-    || fail "the refused card overwrote the stored record"
-  pass "card refuses a closed call and leaves the stored record untouched"
+  assert_absent "$store" "the refused card wrote a record for the closed call"
+  pass "an answer retires the card and card refuses the closed call"
 }
 
 # A refused hold must never read as a recorded one. The gate used to accept the
@@ -4869,6 +5158,11 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_deck_answer_retires_the_card_and_wakes_a_main_home
+test_answer_from_the_owning_session_wakes_nobody
+test_secondmate_deck_answer_publishes_retires_and_wakes_its_home
+test_reheld_call_with_a_rewritten_body_still_closes_its_parent_decision
+test_remote_secondmate_answer_wakes_its_host_local_lane
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake

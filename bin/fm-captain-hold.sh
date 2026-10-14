@@ -92,6 +92,11 @@
 # ordering. An exact retry also completes unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
+# Every answer path then settles the answer in one step - the parent channel's
+# resolved line (below), retirement of state/decision-cards/<task>.json, and a
+# durable wake for the home that owns the call - and a replay or a retry after
+# an interruption completes whatever of that is missing without repeating any
+# of it (settle_answered_call beside the reconcile section owns the details).
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -230,10 +235,15 @@
 # publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
 # `answers`) the matching `resolved` line on the parent channel through
 # bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
-# <n> is the count of resolution records the body already carries plus one, so
-# a released and re-held task opens and closes a distinct parent decision with
-# no new persisted state, and an exact retry republishes the same line, which
-# the channel deduplicates. A main home has no channel and publishes nothing.
+# <n> is one past the resolution records the body carried when the hold was
+# raised (its answer baseline line, else the records it carries now), so a
+# released and re-held task opens and closes a distinct parent decision with
+# no new persisted state, and the answer closes the key its hold opened. Whether
+# a line lands is decided by the channel's fold of that key
+# (fm_parent_channel_report_transition): the answer's resolved line closes an
+# open key even when a body rewrite made an earlier episode reuse it, and a
+# replay against an already closed key appends nothing. A main home has no
+# channel and publishes nothing.
 # The hold or answer is already durable in the backlog, so a channel that
 # cannot be written is reported as `actionable:` on stderr rather than undoing
 # the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
@@ -266,13 +276,17 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-decision-card-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-decision-card-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
-  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+  local id=$1 occurrence=$2 verb=$3 note=$4 key rc=0
+  key="captain-hold-$id-$occurrence"
   PARENT_HOLD_PUBLISHED=0
-  fm_parent_channel_report "$FM_HOME" "$STATE" \
-    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
+  fm_parent_channel_report_transition "$FM_HOME" "$STATE" "$key" \
+    "$verb [key=$key]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
   case "$rc" in
     0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
@@ -820,6 +834,20 @@ body_hold_answer_baseline() {  # <decoded-task-body>
     | head -1
 }
 
+# The occurrence a hold publishes and its answer closes is one past the answers
+# recorded when the hold was raised. The hold's own baseline line names that
+# count, so a body rewritten while the call is open cannot shift the key
+# between the two lines; a hold without a baseline keeps <fallback>.
+current_hold_occurrence() {  # <shown-task-body> <fallback>
+  local baseline
+  baseline=$(body_hold_answer_baseline "$(decode_shown_value "$1" || true)")
+  if [ -n "$baseline" ]; then
+    printf '%s' "$((baseline + 1))"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 strip_hold_header() {  # <decoded-task-body>
   local body=$1 hold_set baseline
   hold_set=$(body_hold_set_timestamp "$body")
@@ -1256,7 +1284,8 @@ command_hold() {
   show=$TASK_SHOW_OUTPUT
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  occurrence=$(current_hold_occurrence "$(show_field "$show" body)" \
+    "$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))")
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   if [ -n "$DECISION_CARD_TMP" ]; then
@@ -1419,9 +1448,9 @@ command_answer() {
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
-        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
+        settle_answered_call "$id" $((occurrence - 1)) "answered (repaired)"
       else
-        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) answered
+        settle_answered_call "$id" $((occurrence - 1)) answered
       fi
       printf 'answered: %s\n' "$id"
       return 0
@@ -1439,7 +1468,7 @@ command_answer() {
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)"
+    settle_answered_call "$id" "$occurrence" "answered (repaired)"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -1460,17 +1489,19 @@ command_answer() {
         answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
+      occurrence=$(current_hold_occurrence "$body" $((occurrence - 1)))
       if ! close_answered "$id" "$release"; then
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
-      publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
+      settle_answered_call "$id" "$occurrence" "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
     if body_has_recorded_digest "$body" "$DECISION_DIGEST"; then
       fail "task $id records this answer before the current hold; a replay cannot answer it"
     fi
+    occurrence=$(current_hold_occurrence "$body" "$occurrence")
     write_resolution_record "$id" "$outcome" "$body"
     if ! close_answered "$id" "$release"; then
       fail "could not close answered captain-held task $id"
@@ -1480,7 +1511,7 @@ command_answer() {
     show=$TASK_SHOW_OUTPUT
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome"
+    settle_answered_call "$id" "$occurrence" "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
@@ -1493,7 +1524,7 @@ command_answer() {
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     remove_interrupted_answer_stamp "$id"
-    publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
+    settle_answered_call "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -1700,10 +1731,18 @@ command_answers() {
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         occurrence=$(resolution_record_count "$body")
+        # The replay settles the record it matched, so the wake carries that
+        # record's own text and digest, exactly as its first delivery did.
+        if [ "$recorded_digest" = "$digest" ]; then
+          DECISION_TEXT=$(cat "$tmp")
+        else
+          DECISION_TEXT=$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")
+        fi
+        DECISION_DIGEST=$recorded_digest
         case "$recorded_mode" in
-          repaired) publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" ;;
-          released) publish_parent_resolution_then_retire "$id" "$occurrence" released ;;
-          *) publish_parent_resolution_then_retire "$id" "$occurrence" answered ;;
+          repaired) settle_answered_call "$id" "$occurrence" "answered (repaired)" ;;
+          released) settle_answered_call "$id" "$occurrence" released ;;
+          *) settle_answered_call "$id" "$occurrence" answered ;;
         esac
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
@@ -1798,14 +1837,93 @@ reconcile_request_retire() {  # <task-id>
     || fail "could not retire the pending reconcile request for $1"
 }
 
-publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
+# --- one answer, every effect ------------------------------------------------
+# A recorded captain answer is settled by one step that every answer path,
+# first delivery and replay alike, runs once the backlog record is durable:
+# the resolved line on the parent channel, the decision card leaving the
+# store the deck reads live, and a durable wake for the home that owns the
+# call. Each effect is idempotent per answer, so a replay - or a retry after an
+# interruption between them - completes what is missing and repeats nothing.
+settle_answered_call() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
   publish_parent_hold "$id" "$occurrence" resolved "$note"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
+  retire_decision_card "$id"
+  wake_answer_owner "$id" "$occurrence" "$note"
   reconcile_request_retire "$id"
+}
+
+# The card belongs to a live hold, and the answered call no longer is one.
+# The answer is already durable, so a card that cannot be removed is reported
+# rather than undoing it; the board build's prune remains the backstop.
+retire_decision_card() {  # <task-id>
+  local card="$STATE/decision-cards/$1.json"
+  [ -e "$card" ] || [ -L "$card" ] || return 0
+  rm -f -- "$card" \
+    || printf 'actionable: task %s is answered but its decision card %s could not be retired\n' "$1" "$card" >&2
+}
+
+answer_wake_text() {  # <task-id> <note>
+  local id=$1 outcome=answered effect='The call is closed, so carry out the decision.'
+  if [ "$2" = released ]; then
+    outcome=released
+    effect='The hold is released, so resume the work it gated.'
+  fi
+  printf 'Captain answer recorded for held call %s (%s): act on it now. %s The answer is already recorded on that task in this home'"'"'s backlog, so do not record it again.\n\nRecorded decision:\n%s\n' \
+    "$id" "$outcome" "$effect" "$DECISION_TEXT"
+}
+
+# Wake the session of the home that owns the call. Inside a secondmate home
+# that session is woken through its own steering lane, exactly as its parent
+# steers it (bin/fm-parent-channel-lib.sh resolves the lane, bin/fm-send.sh
+# delivers); a main home's session through its captain inbox
+# (bin/fm-inbox.sh note), whose check wake it drains. Both are durable, and
+# both are keyed by a delivery id derived from the task, the occurrence, and
+# the decision digest: a lane record already carrying that id - pending or
+# handled - means this answer has woken its owner, and the inbox request id
+# replays without a second wake. The session holding this home's lock needs no
+# wake when it is the caller, because it is already acting on the answer.
+wake_answer_owner() {  # <task-id> <occurrence> <note>
+  local id=$1 occurrence=$2 note=$3 delivery text err rc=0 lane_rc=0 inbox reason
+  [ -n "$DECISION_DIGEST" ] || return 0
+  if [ -f "$STATE/.lock" ] && fm_session_lock_owned_by_self "$STATE"; then
+    return 0
+  fi
+  delivery=$(sha256_text "$(printf 'captain-answer\t%s\t%s\t%s' "$id" "$occurrence" "$DECISION_DIGEST")")
+  delivery=${delivery:0:16}
+  text=$(answer_wake_text "$id" "$note")
+  err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-wake.XXXXXX") || {
+    printf 'actionable: task %s is answered but its owning home could not be woken (no diagnostics file)\n' "$id" >&2
+    return 0
+  }
+  fm_parent_channel_lane "$FM_HOME" "$STATE" || lane_rc=$?
+  case "$lane_rc" in
+    0)
+      inbox="$FM_PARENT_CHANNEL_LANE_STATE/$FM_PARENT_CHANNEL_ID.inbox"
+      if ! grep -qsF -- "delivery=$delivery " "$inbox"/*.msg "$inbox"/handled/*.msg; then
+        FM_HOME="$FM_PARENT_CHANNEL_LANE_HOME" FM_STATE_OVERRIDE="$FM_PARENT_CHANNEL_LANE_STATE" \
+          FM_CONFIG_OVERRIDE="$FM_PARENT_CHANNEL_LANE_HOME/config" \
+          "$SCRIPT_DIR/fm-send.sh" "$FM_PARENT_CHANNEL_ID" --fire-and-forget "$delivery" "$text" \
+          </dev/null >/dev/null 2>"$err" || rc=$?
+      fi
+      ;;
+    1)
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        "$SCRIPT_DIR/fm-inbox.sh" note --request-id "captain-answer-$delivery" -- "$text" \
+        </dev/null >/dev/null 2>"$err" || rc=$?
+      ;;
+    *) rc=$lane_rc; printf 'its steering lane cannot be resolved (rc=%s)\n' "$lane_rc" > "$err" ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    # The delivering command's own verdict is its last line; anything before
+    # it is advisory supervision output that would bury the reason.
+    reason=$(sed '/^[[:space:]]*$/d' "$err" | tail -n 1)
+    printf 'actionable: task %s is answered but its owning home was not woken: %s\n' "$id" "${reason:-rc=$rc}" >&2
+  fi
+  rm -f -- "$err"
 }
 
 command_reconcile_requests() {

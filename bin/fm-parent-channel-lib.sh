@@ -40,7 +40,18 @@
 # The parent watcher classifies lines there exactly as it classifies any
 # crewmate's status stream, so a captain-relevant line becomes a parent wake.
 #
+# THE LANE. The channel's inbound counterpart is the mate's own steering lane:
+# the endpoint record and steering inbox the parent steers this mate through.
+# A local route keeps them in the parent home's state/<mate-id>.meta and
+# state/<mate-id>.inbox; a remote route keeps them host-local in this home's
+# state/parent-route/ (bin/fm-remote-secondmate-control.sh). A publisher that
+# must wake this home's own session resolves the lane here and steers it
+# through bin/fm-send.sh like any other caller.
+#
 # Line syntax and retry equivalence are owned by fm-classify-lib.sh.
+# A keyed decision transition is the one exception to text-level retry
+# equivalence: its key is reused by a later episode of the same call, so the
+# channel's own fold decides whether it is new (fm_parent_channel_report_transition).
 # An existing destination must be a regular, non-symlinked file; a missing one
 # is created with its directory.
 #
@@ -166,10 +177,79 @@ fm_parent_channel_append_once() {  # <path> <line>
   printf '%s\n' "$line" >> "$path"
 }
 
+# Append <line> unconditionally, for a caller that already decided it is new.
+fm_parent_channel_append() {  # <path> <line>
+  local path=$1 line=$2
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  else
+    mkdir -p "$(dirname "$path")" || return 1
+  fi
+  printf '%s\n' "$line" >> "$path"
+}
+
 # Publish one parent-facing line from <home>. See the return codes above.
 fm_parent_channel_report() {  # <home> <state> <line>
   local home=$1 state=$2 line=$3 destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 4
+}
+
+# Publish one keyed decision transition from <home>: <line> opens <key>
+# (needs-decision, blocked) or closes it (resolved, captain-held). Text-level
+# retry equivalence cannot judge such a line, because a re-held call reuses its
+# key with the same text an earlier episode already carried, and a status file
+# remembers every line it ever held: the new episode's line would read as a
+# retry and never land. So the channel's own fold (status_key_closing_verb)
+# decides instead. A line that moves the key - opening a closed key, or closing
+# an open one - is appended even when identical text sits in an earlier
+# episode. A closing line for a key that is already closed is a replay and
+# appends nothing. A key the channel never stated, and an opening line for a
+# key that is still open, keep append-once retry equivalence. Same return codes
+# as fm_parent_channel_report.
+fm_parent_channel_report_transition() {  # <home> <state> <key> <line>
+  local home=$1 state=$2 key=$3 line=$4 destination rc=0 verb current opens=0 open=0
+  destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  status_line_verb "$line" verb
+  current=$(status_key_closing_verb "$destination" "$key")
+  case "$verb" in needs-decision|blocked) opens=1 ;; esac
+  case "$current" in needs-decision|blocked) open=1 ;; esac
+  line=$(status_stamp_line "$line")
+  if [ -z "$current" ]; then
+    fm_parent_channel_append_once "$destination" "$line" || return 4
+  elif [ "$opens" != "$open" ]; then
+    fm_parent_channel_append "$destination" "$line" || return 4
+  elif [ "$opens" = 1 ]; then
+    fm_parent_channel_append_once "$destination" "$line" || return 4
+  fi
+  return 0
+}
+
+# Resolve the steering lane of <home> (see THE LANE above): sets
+# FM_PARENT_CHANNEL_LANE_HOME, FM_PARENT_CHANNEL_LANE_STATE, and
+# FM_PARENT_CHANNEL_ID. Same return codes as fm_parent_channel_destination.
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
+FM_PARENT_CHANNEL_LANE_HOME=
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
+FM_PARENT_CHANNEL_LANE_STATE=
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
+fm_parent_channel_lane() {  # <home> <state>
+  local home=$1 state=$2 rc=0
+  FM_PARENT_CHANNEL_LANE_HOME=
+  FM_PARENT_CHANNEL_LANE_STATE=
+  fm_parent_channel_destination "$home" "$state" >/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  case "$FM_PARENT_CHANNEL_ROUTE" in
+    local)
+      FM_PARENT_CHANNEL_LANE_HOME=$FM_SECONDMATE_PARENT_HOME
+      FM_PARENT_CHANNEL_LANE_STATE="$FM_SECONDMATE_PARENT_HOME/state"
+      ;;
+    remote)
+      FM_PARENT_CHANNEL_LANE_HOME=$home
+      FM_PARENT_CHANNEL_LANE_STATE="$home/state/parent-route"
+      ;;
+    *) return 3 ;;
+  esac
 }

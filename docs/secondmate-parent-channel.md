@@ -25,7 +25,7 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | Ship child PR ready | the child's `done:` PR ready line, whose accepted spellings the publisher below owns; `pr=` in the child's record once registered | `bin/fm-inactive-reconcile.sh` on the next poll with the child's line; `bin/fm-pr-check.sh` at registration with the canonical URL |
 | Scout child findings | the child's `done:` line plus `data/<child>/report.md` | `bin/fm-inactive-reconcile.sh` on the next poll, with the report pointer |
 | Child failed | the child's `failed:` line | `bin/fm-inactive-reconcile.sh` on the next poll |
-| Child decision escalated to the captain | the task held for the captain in the mate backlog | `bin/fm-captain-hold.sh hold`, and its answer by `answer` |
+| Child decision escalated to the captain | the task held for the captain in the mate backlog | `bin/fm-captain-hold.sh hold`, and its answer by `answer` or `answers`, whichever channel delivered it |
 | PR merged | the merge poll or the mate's own merge | `bin/fm-merge-outcome-lib.sh` |
 | Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
 | Child ended silently | terminal current state with a silent ledger | the existing inactive-outcome scan in `bin/fm-inactive-reconcile.sh` |
@@ -42,6 +42,11 @@ The mate home's own status scans treat that remote channel the same way: `status
 The remote reply adapter already mirrors every channel line into the parent home, so folding the channel again here would only spin spurious wakes and a phantom `parent-replies` task, while a `parent-replies.status` in a main home or in a local mate is an ordinary task log that keeps folding and waking.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 
+A captain hold reuses its parent key `captain-hold-<task>-<n>` when a re-held task's earlier answer was rewritten out of its body, so the new episode's lines can repeat an earlier episode's text exactly.
+Text-level retry equivalence would then swallow the new `resolved` line and leave the parent folding an answered call open.
+`bin/fm-parent-channel-lib.sh` therefore publishes a keyed decision transition by the channel's own fold of that key: it lands whenever it moves the key, and a closing line for a key already closed is a replay that appends nothing.
+An answer recorded inside the mate home also wakes the mate itself, because a channel line wakes only the parent: the answer path steers the mate's own lane through `bin/fm-send.sh` exactly as the parent would, once per answer ([`captain-hold-lifecycle.md`](captain-hold-lifecycle.md#what-one-answer-settles)).
+
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
@@ -52,7 +57,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 ## Regression coverage
 
 `tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a ship `done:` withheld while its named head exists only in the worker copy, a pending one still delivered after teardown removes that copy, a line still being appended, later routine status prose not minting a fresh parent event because the inactive receipt identity binds structured fields only, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
-`tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, and a main home publishing nothing.
+`tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, a re-held call with a rewritten body still closing its reused key, a deck answer waking the local and the remote mate's own lane once, and a main home publishing nothing.
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 `tests/fm-brief.test.sh` pins the charter's channel rule.

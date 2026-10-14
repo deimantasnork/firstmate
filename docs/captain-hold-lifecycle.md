@@ -13,6 +13,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | What is a captain call, and which subcommand does what? | [Mechanism](#mechanism) |
 | Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
+| What does one answer change, and who is woken? | [What one answer settles](#what-one-answer-settles) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
 | Where does a hold appear in snapshots and Bearings? | [Structured read surfaces](#structured-read-surfaces) |
@@ -88,6 +89,20 @@ It then works in this order:
 If the close is interrupted, the still-held task therefore keeps its original age basis.
 A matching retry also completes any resolution-first normalization left unfinished after the close itself succeeded.
 
+### What one answer settles
+
+A recorded answer must take effect everywhere at once, so every answer path - `answer`, `answer --release`, and each key `answers` resolves - settles it in one step once the backlog record is durable:
+
+1. Inside a secondmate home, the `resolved [key=captain-hold-<task>-<n>]` line reaches the parent channel.
+   `<n>` comes from the answer baseline the hold recorded, so the answer closes the key its hold opened, and the channel's own fold decides whether the line is new ([`secondmate-parent-channel.md`](secondmate-parent-channel.md#the-design)).
+2. The card at `state/decision-cards/<task>.json` leaves the store, because the deck reads that store live and shows whatever it holds.
+3. The session of the home that owns the call is woken durably, because a parent-channel line wakes only the parent and a deck answer wakes nobody else.
+   A secondmate is woken through its own steering lane, the inbox its parent steers it through, with one fire-and-forget record and one doorbell; a main home through its captain inbox, whose note queues one `check` wake.
+
+Each effect is keyed to the answer, so a replay, or a retry after an interruption between them, completes what is missing and repeats nothing, also after the woken session acknowledged its wake.
+The session holding the home's lock is not woken when it records the answer itself, because it is already acting on it.
+A wake that cannot be delivered is reported as `actionable:` on stderr rather than undoing the recorded answer.
+
 ### Answer retries and tasks closed elsewhere
 
 - An exact retry is idempotent only when the requested close mode matches the newest record.
@@ -140,6 +155,7 @@ record `bin/fm-bearings-board.sh build` persists, under
 `state/decision-cards/<task>.json`; `card <task-id>` rewrites it for an open
 call. Validation is fail-closed and runs before the hold's first mutation, so
 a malformed card leaves the task, the backlog, and the store untouched.
+The answer retires the card ([What one answer settles](#what-one-answer-settles)), and the board build's prune below remains the backstop.
 
 **The store is a source as well as a sink, and it wins.** For a key the payload
 also carries, `build` uses the durable record: it was authored where the
@@ -568,6 +584,10 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
+- One answer, through `answers` or `answer --release`, retires its card and wakes the owning home once in a main home, a local secondmate, and a remote secondmate, and a secondmate's answer publishes its resolved line once.
+  Replays repeat none of it, also after the woken session acknowledged its wake, and an unrelated open hold keeps its card, its hold, and its open parent decision.
+- A re-held call whose earlier answer was rewritten out of its body reopens and closes its reused parent key in every episode.
+- An answer recorded by the session holding the home's lock queues no wake; this case runs only under a verified harness ancestry and reports a skip otherwise.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.

@@ -95,11 +95,13 @@
 # The store has a second writer: bin/fm-captain-hold.sh writes the same record
 # when a call is RAISED with structured options, so the Deck shows the options,
 # context, and recommendation the asking agent already had instead of waiting
-# for a composition to re-derive them. The store is therefore a source for a
-# key as well as a sink, and its precedence rule is STORE-FIRST: for a key the
-# payload also carries, the stored record is the effective card, because it was
-# authored where the question was raised and can be newer than the payload's
-# snapshot; the payload's copy is used only for a key the store does not hold.
+# for a composition to re-derive them, and it retires the record when the call
+# is answered, leaving this build's prune as the backstop. The store is
+# therefore a source for a key as well as a sink, and its precedence rule is
+# STORE-FIRST: for a key the payload also carries, the stored record is the
+# effective card, because it was authored where the question was raised and can
+# be newer than the payload's snapshot; the payload's copy is used only for a
+# key the store does not hold.
 # Every merged record is re-validated in its stored form and a malformed record
 # is reported and left out rather than failing the build, so a damaged file can
 # never take the board down.
