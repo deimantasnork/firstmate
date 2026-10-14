@@ -221,7 +221,7 @@ const pi = {
   async sendUserMessage(content, options) {
     mainUserMessages.push({ content, options: options ?? {} });
     for (const handler of piHandlers.get("before_agent_start") ?? []) {
-      await handler({ prompt: content }, sessionCtx);
+      await handler({ messageType: "user", prompt: content }, sessionCtx);
     }
     for (const handler of piHandlers.get("message_start") ?? []) {
       await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
@@ -428,7 +428,7 @@ const pi = {
   async sendUserMessage(content, options) {
     mainUserMessages.push({ content, options: options ?? {} });
     for (const handler of piHandlers.get("before_agent_start") ?? []) {
-      await handler({ prompt: content }, sessionCtx);
+      await handler({ messageType: "user", prompt: content }, sessionCtx);
     }
     for (const handler of piHandlers.get("message_start") ?? []) {
       await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
