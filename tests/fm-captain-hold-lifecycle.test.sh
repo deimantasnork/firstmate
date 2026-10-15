@@ -2577,7 +2577,9 @@ test_legacy_identities_keep_working() {
 # board went on presenting as armed. Everything between the captured result and
 # the closed task is asserted here end to end - capture, the wake that tells
 # firstmate to look, and the recorded answer - because each of those was intact
-# on its own while the chain as a whole delivered nothing.
+# on its own while the chain as a whole delivered nothing. That one wake is also
+# the answer's only notification, and the answered call's card still leaves the
+# store.
 test_board_answer_reaches_the_keyed_answer_intake() {
   local home sid stub out queue show
   home=$(make_home board-channel)
@@ -2585,8 +2587,10 @@ test_board_answer_reaches_the_keyed_answer_intake() {
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
 
   run_captain "$home" hold sample-board-call --title "Choose the sample board route" \
-    --reason "captain board route choice pending" --repo sample >/dev/null \
+    --reason "captain board route choice pending" --repo sample \
+    --option "north:Take the north route" --option "south:Take the south route" >/dev/null \
     || fail "could not register the board call"
+  assert_present "$home/state/decision-cards/sample-board-call.json" "the board call has no card"
 
   # One published Lavish poll response carrying the captain's structured answer,
   # in the shape the adapter's own reader parses: a declared field order, an
@@ -2618,13 +2622,21 @@ SH
   queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
   assert_contains "$queue" "check: procevent lavish $sid 1" \
     "the captured board answer produced no wake: $queue"
+  # The capture's own wake already tells this home about the answer, so the
+  # answer adds no captain-inbox wake of its own: one answer, one notification.
+  [ "$(printf '%s\n' "$queue" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "one board answer did not produce exactly one notification: $queue"
+  [ ! -e "$home/state/inbox" ] || [ -z "$(find "$home/state/inbox" -name '*.note')" ] \
+    || fail "the board answer also left a captain-inbox wake: $(cat "$home/state/inbox"/*.note)"
 
   show=$(tasks_in "$home" show sample-board-call --full)
   assert_contains "$show" "state: done" "the board answer did not close the captain call"
   assert_contains "$show" "north" "the board answer lost the captain's selection"
   assert_contains "$show" "the captured result $sid sequence 1" \
     "the recorded answer did not name the board result that carried it"
-  pass "a board answer reaches the keyed-answer intake and wakes firstmate"
+  assert_absent "$home/state/decision-cards/sample-board-call.json" \
+    "the board answer kept the answered call's card"
+  pass "a board answer reaches the keyed-answer intake, retires its card, and wakes firstmate once"
 }
 
 # The intake is channel-agnostic, so chat must reach it the same way a captured

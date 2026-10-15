@@ -1885,10 +1885,15 @@ answer_wake_text() {  # <task-id> <note>
 # the decision digest: a lane record already carrying that id - pending or
 # handled - means this answer has woken its owner, and the inbox request id
 # replays without a second wake. The session holding this home's lock needs no
-# wake when it is the caller, because it is already acting on the answer.
+# wake when it is the caller, because it is already acting on the answer, and
+# neither does a session the delivering channel already wakes with this answer:
+# a caller declaring FM_CAPTAIN_ANSWER_ANNOUNCED=1 (the process-event runner,
+# whose captured board result reaches that session as its own check wake) gets
+# no second wake, so one answer notifies once.
 wake_answer_owner() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 delivery text err rc=0 lane_rc=0 inbox reason
   [ -n "$DECISION_DIGEST" ] || return 0
+  [ "${FM_CAPTAIN_ANSWER_ANNOUNCED:-}" != 1 ] || return 0
   if [ -f "$STATE/.lock" ] && fm_session_lock_owned_by_self "$STATE"; then
     return 0
   fi

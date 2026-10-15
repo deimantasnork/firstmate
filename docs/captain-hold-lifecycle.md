@@ -101,6 +101,8 @@ A recorded answer must take effect everywhere at once, so every answer path - `a
 
 Each effect is keyed to the answer, so a replay, or a retry after an interruption between them, completes what is missing and repeats nothing, also after the woken session acknowledged its wake.
 The session holding the home's lock is not woken when it records the answer itself, because it is already acting on it.
+Nor is a session the delivering channel already wakes with the answer: a bound process-event source's captured result, such as a Lavish board answer, reaches its home as its own `check` wake, so the runner declares the answer announced and that wake is its one notification.
+A worker-owned round, a silent result, and a self-announcing adapter's capture reach no such wake, so their answers keep the wake above.
 A wake that cannot be delivered is reported as `actionable:` on stderr rather than undoing the recorded answer.
 
 ### Answer retries and tasks closed elsewhere
@@ -588,6 +590,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   Replays repeat none of it, also after the woken session acknowledged its wake, and an unrelated open hold keeps its card, its hold, and its open parent decision.
 - A re-held call whose earlier answer was rewritten out of its body reopens and closes its reused parent key in every episode.
 - An answer recorded by the session holding the home's lock queues no wake; this case runs only under a verified harness ancestry and reports a skip otherwise.
+- A board answer captured by the process-event runner in a main home retires its card and produces exactly one notification, the capture's own `check` wake, with no captain-inbox wake.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.

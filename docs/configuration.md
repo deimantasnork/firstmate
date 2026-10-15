@@ -2276,6 +2276,7 @@ Some built-in sources carry the captain's answer to a captain-held task, and wha
 
 - The reserved Reconcile selection uses the parallel optional `reconciles` adapter command and binding-verified `reconcile-requests` intake rather than entering keyed answers; [`captain-hold-lifecycle.md`](captain-hold-lifecycle.md#reconcile-re-check-reality-never-a-blind-close) owns those semantics.
 - Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer or request is transcription while acting on it is firstmate's judgement.
+- A capture announced as the home's own `check` wake is the fed answer's one notification, so the feed tells the intake to queue no second wake for it ([`captain-hold-lifecycle.md`](captain-hold-lifecycle.md#what-one-answer-settles)).
 - An unbound built-in source, a built-in adapter without the corresponding command, and a failure on either side all leave the capture untouched and still announced.
 - External binding responses never enter either authority-bearing intake.
 
