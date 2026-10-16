@@ -558,7 +558,7 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
 # card wrongly hidden is worse than one wrongly shown - the same asymmetry as
 # the card hygiene above.
 
-DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
+DECISION_CARDS_DIR="$STATE/decision-cards"
 DECISION_CARD_LOCKS=()
 DECISION_CARD_LOCK_COUNT=0
 
@@ -580,11 +580,18 @@ bearings_board_cleanup() {
 }
 trap bearings_board_cleanup EXIT
 
+decision_card_key_valid() {  # <key>
+  jq -ne --arg key "$1" "$FM_DECISION_CARD_JQ_DEFS"'$key | slug(128)' >/dev/null 2>&1
+}
+
 acquire_decision_card_locks() {  # <payload.json>
   local data=$1 file key lock
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
+    if ! decision_card_key_valid "$key"; then
+      printf 'ignored-store-card: %s (file name is not a valid card key)\n' "$key" >&2
+      continue
+    fi
     lock="$STATE/.control-$key.lock"
     fm_lock_acquire_wait "$lock" || return 1
     DECISION_CARD_LOCKS[DECISION_CARD_LOCK_COUNT]=$lock

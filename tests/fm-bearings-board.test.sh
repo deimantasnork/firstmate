@@ -7,6 +7,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
@@ -104,10 +106,22 @@ SH
 end_session_as_captain() { : > "$1/lavish-state/user-ended"; : > "$1/lavish-state/open"; }
 
 run_board() {  # <home> <args...>
-  local home=$1
+  local home=$1 state
   shift
+  state=${FM_TEST_BOARD_STATE:-$home/state}
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" "$@"
+}
+
+run_board_timed() {  # <seconds> <home> <args...>
+  local seconds=$1 home=$2 state
+  shift 2
+  state=${FM_TEST_BOARD_STATE:-$home/state}
+  fm_run_timed "$seconds" env PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" "$@"
@@ -217,13 +231,14 @@ SH
   chmod +x "$stub"
 }
 
-stash_store_card() {  # <home> <key>; a raise-time record shape for one key
-  local home=$1 key=$2
-  mkdir -p "$home/state/decision-cards"
+stash_store_card() {  # <home> <key> [state]; a raise-time record shape for one key
+  local home=$1 key=$2 state
+  state=${3:-$home/state}
+  mkdir -p "$state/decision-cards"
   jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-18T00:00:00Z",
     card:{key:$key, type:"decision", repo:"sample", title:"Raise-time storage choice",
       options:[{value:"keep", label:"Keep it"}], allow_freeform:true}}' \
-    > "$home/state/decision-cards/$key.json"
+    > "$state/decision-cards/$key.json"
 }
 
 extract_payload() {  # <board-path>
@@ -994,6 +1009,56 @@ test_refresh_composes_from_the_snapshot_and_merges_the_store_card() {
   pass "refresh composes the snapshot rows and merges the stored decision card"
 }
 
+test_refresh_uses_the_configured_state_store() {
+  local home state stub key
+  home=$(make_home refresh-state-override)
+  state="$home/override-state"
+  key=sample-open-call
+  mkdir -p "$state"
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  stash_store_card "$home" "$key" "$state"
+
+  FM_TEST_BOARD_STATE="$state" FM_BEARINGS_BOARD_SNAPSHOT="$stub" \
+    run_board "$home" refresh >/dev/null \
+    || fail "refresh failed with a configured state override"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '
+    (.captains_call[] | select(.key == $key) | .title) == "Raise-time storage choice"' \
+    "$home/served.json" >/dev/null \
+    || fail "refresh did not merge the authored card from the configured state store"
+  jq -e '.card.title == "Raise-time storage choice"' \
+    "$state/decision-cards/$key.json" >/dev/null \
+    || fail "refresh did not persist the card in the configured state store"
+  assert_absent "$home/state/decision-cards/$key.json" \
+    "refresh wrote a parallel card into the default home state"
+  pass "refresh reads and persists cards in the configured state store"
+}
+
+test_build_skips_an_out_of_contract_store_filename_before_locking() {
+  local home data store key out rc
+  home=$(make_home invalid-store-key)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=merge.
+  while [ "${#key}" -lt 242 ]; do key=${key}a; done
+  write_valid_payload "$data"
+  mkdir -p "$store"
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-19T00:00:00Z",
+    card:{key:$key, type:"merge", repo:"sample", title:"Oversized key", risk:"low",
+      options:[{value:"hold", label:"Hold"}], allow_freeform:true}}' > "$store/$key.json"
+
+  set +e
+  out=$(run_board_timed 10 "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail "build hung while locking an out-of-contract store filename"
+  [ "$rc" -eq 0 ] || fail "build failed while skipping an out-of-contract store filename: $out"
+  assert_contains "$out" "ignored-store-card: $key (file name is not a valid card key)" \
+    "build did not name the out-of-contract store filename"
+  pass "build skips an out-of-contract store filename before locking"
+}
+
 # A stored record the shared contract rejects is named and skipped, not merged
 # into the payload where the validator would fail the whole refresh.
 test_refresh_ignores_a_malformed_store_card() {
@@ -1148,6 +1213,8 @@ test_build_merges_the_durable_card_store_first
 test_build_ignores_a_malformed_store_card_without_failing
 test_build_serializes_store_merge_and_persistence_with_card_writers
 test_refresh_composes_from_the_snapshot_and_merges_the_store_card
+test_refresh_uses_the_configured_state_store
+test_build_skips_an_out_of_contract_store_filename_before_locking
 test_refresh_ignores_a_malformed_store_card
 test_build_ignores_a_store_envelope_of_another_schema
 test_refresh_ignores_a_store_envelope_of_another_schema
