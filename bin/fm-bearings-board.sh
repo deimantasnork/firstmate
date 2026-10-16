@@ -616,7 +616,7 @@ acquire_decision_card_locks() {  # <payload.json>
 }
 
 persist_decision_cards() {  # <effective-payload.json>
-  local data=$1 key card tmp existing task rc keep=''
+  local data=$1 key card tmp existing task live_task rc keep=''
   if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
     :
   elif ! (umask 077; mkdir -p "$DECISION_CARDS_DIR"); then
@@ -646,8 +646,12 @@ persist_decision_cards() {  # <effective-payload.json>
     case $'\n'"$keep" in
       *$'\n'"$task"$'\n'*) continue ;;
     esac
+    live_task=$task
+    if jq -e '.card.type == "merge"' "$existing" >/dev/null 2>&1; then
+      case "$live_task" in merge.*) live_task=${live_task#merge.} ;; esac
+    fi
     rc=0
-    "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$live_task" --distinguish-absent >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 1 ] || continue
     rm -f -- "$existing" || return 1
   done

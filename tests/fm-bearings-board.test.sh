@@ -852,6 +852,37 @@ test_build_persists_decision_cards_durably() {
   pass "build persists the effective decision cards for later readers"
 }
 
+test_build_prunes_closed_merge_cards_by_underlying_task() {
+  local home data store live closed key
+  home=$(make_home prune-merge-cards)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  live=sample-live-call
+  closed=sample-closed-call
+  write_valid_payload "$data"
+  fm_test_tasks_toml "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] $live - Decide the live sample (repo: sample) (kind: captain) (hold: choose) (hold-kind: captain)
+
+## Done
+- [x] $closed - Decide the closed sample (repo: sample) (kind: captain) (hold: chose) (hold-kind: captain)
+EOF
+  mkdir -p "$store"
+  for key in "merge.$live" "merge.$closed"; do
+    jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-19T00:00:00Z",
+      card:{key:$key, type:"merge", repo:"sample", title:"Merge sample", risk:"low",
+        options:[{value:"merge", label:"Merge"}], allow_freeform:true}}' > "$store/$key.json"
+  done
+
+  run_board "$home" build "$data" >/dev/null || fail "a build with stored merge cards failed"
+  assert_present "$store/merge.$live.json" "build pruned a merge card whose underlying call is live"
+  assert_absent "$store/merge.$closed.json" "build retained a merge card whose underlying call is closed"
+  pass "build prunes merge cards by their underlying captain-held task"
+}
+
 # The bearings skill forbids two cards for one task id, so the store writer is
 # the last line of defense: a file that carries two JSON documents makes a
 # later reader refuse the whole record. Exactly one card per key is written.
@@ -1194,6 +1225,7 @@ test_refresh_refuses_a_broken_snapshot_before_touching_the_board() {
 
 test_path_is_stable_and_home_scoped
 test_build_persists_decision_cards_durably
+test_build_prunes_closed_merge_cards_by_underlying_task
 test_build_persists_one_store_card_for_a_duplicated_call_key
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
