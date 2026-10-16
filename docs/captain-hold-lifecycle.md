@@ -140,7 +140,7 @@ Validation runs before the hold's first mutation, so a malformed card leaves the
 
 **The store is a source as well as a sink, and it wins.**
 For a key the payload also carries, `build` uses the durable record because it was authored where the question was raised and can be newer than the payload's snapshot, while a payload card is used only for a key the store does not hold.
-A record that fails the stored form of the contract, or whose card names another task, is named on stderr as `ignored-store-card:` and skipped rather than failing the build.
+A record that is not an `fm-decision-card.v1` envelope, fails the stored form of the contract, or whose card names another task is named on stderr as `ignored-store-card:` and skipped rather than failing the build.
 Because the store is authoritative for its keys, refining a card's copy uses `bin/fm-captain-hold.sh card`, not a payload rewrite.
 
 **The deterministic floor.**

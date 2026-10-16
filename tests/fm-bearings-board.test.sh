@@ -969,6 +969,65 @@ test_refresh_ignores_a_malformed_store_card() {
   pass "refresh skips a malformed stored card and keeps the board current"
 }
 
+# The schema an envelope declares is part of the stored form: a record that
+# would merge as fm-decision-card.v1 is named and skipped once it names another
+# schema, in both the build merge and the refresh merge.
+test_build_ignores_a_store_envelope_of_another_schema() {
+  local home data store key out
+  home=$(make_home store-old-schema)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid payload did not build"
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v1", generated:"2026-08-19T00:00:00Z",
+    card:{key:$key, type:"decision", repo:"sample", title:"Raise-time card",
+      options:[{value:"ship", label:"Ship it"}], allow_freeform:true}}' > "$store/$key.json"
+  run_board "$home" build "$data" >/dev/null || fail "a rebuild with a stored card did not build"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '(.captains_call[] | select(.key == $key) | .title) == "Raise-time card"' \
+    "$home/served.json" >/dev/null || fail "the control fm-decision-card.v1 record was not merged"
+  jq -n --arg key "$key" '{schema:"fm-decision-card.v0", generated:"2026-08-19T00:00:00Z",
+    card:{key:$key, type:"decision", repo:"sample", title:"Raise-time card",
+      options:[{value:"ship", label:"Ship it"}], allow_freeform:true}}' > "$store/$key.json"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "an old-schema stored record failed the build"
+  assert_contains "$out" "ignored-store-card: $key (envelope schema must be fm-decision-card.v1)" \
+    "the build did not name the old-schema record: $out"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '(.captains_call[] | select(.key == $key) | .title) == "Perishable-first admission"' \
+    "$home/served.json" >/dev/null \
+    || fail "an old-schema stored record replaced the payload copy"
+  pass "build ignores a store envelope that names another schema"
+}
+
+test_refresh_ignores_a_store_envelope_of_another_schema() {
+  local home stub key out rc
+  home=$(make_home refresh-old-schema)
+  key=merge.sample-open-call
+  write_snapshot_stub "$home"
+  stub="$home/fakebin/snapshot-stub"
+  stash_store_card "$home" "$key"
+  FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh >/dev/null \
+    || fail "refresh failed with a valid stored card"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '[.captains_call[].key] | index($key) != null' "$home/served.json" >/dev/null \
+    || fail "the control fm-decision-card.v1 record was not merged by refresh"
+  stash_store_card "$home" "$key"
+  jq '.schema = "fm-decision-card.v0"' "$home/state/decision-cards/$key.json" > "$home/old.json"
+  mv -f -- "$home/old.json" "$home/state/decision-cards/$key.json"
+  set +e
+  out=$(FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "an old-schema stored record failed the whole refresh: $out"
+  assert_contains "$out" "ignored-store-card: $key (envelope schema must be fm-decision-card.v1)" \
+    "refresh did not name the old-schema record: $out"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '[.captains_call[].key] | index($key) == null' "$home/served.json" >/dev/null \
+    || fail "an old-schema stored record still reached the board payload"
+  pass "refresh ignores a store envelope that names another schema"
+}
+
 # A stored card for a hold the snapshot does not list as live - blocked, dated,
 # reconciling, or aged - stays in the durable store and out of Captain's Call,
 # where the call belongs to a disclosed Charted Next gate instead.
@@ -1039,5 +1098,7 @@ test_build_merges_the_durable_card_store_first
 test_build_ignores_a_malformed_store_card_without_failing
 test_refresh_composes_from_the_snapshot_and_merges_the_store_card
 test_refresh_ignores_a_malformed_store_card
+test_build_ignores_a_store_envelope_of_another_schema
+test_refresh_ignores_a_store_envelope_of_another_schema
 test_refresh_keeps_a_deferred_hold_out_of_captains_call
 test_refresh_refuses_a_broken_snapshot_before_touching_the_board

@@ -162,7 +162,7 @@ board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 # card per open call, and the durable store merged in by build. Nothing here
 # reads prose to classify anything, and nothing here invents ranking judgment.
 compose_payload() {  # <dest.json>
-  local dest=$1 snapshot tmp file key extra='[]' card='' stored='' reasons=''
+  local dest=$1 snapshot tmp file key extra='[]' card=''
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -x "$SNAPSHOT_BIN" ] || fail "the bearings snapshot is missing: $SNAPSHOT_BIN"
   snapshot=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-snapshot.XXXXXX") \
@@ -237,19 +237,11 @@ compose_payload() {  # <dest.json>
       case "$key" in merge.*) ;; *) continue ;; esac
       jq -e --arg key "$key" '[.captains_call[]?.key] | index($key) != null' "$tmp" >/dev/null 2>&1 && continue
       jq -e --arg task "${key#merge.}" '[.captains_call[]?.key] | index($task) != null' "$tmp" >/dev/null 2>&1 || continue
-      card=$(jq -c '.card? // empty' "$file" 2>/dev/null) || card=''
-      reasons=''
-      if [ -n "$card" ]; then
-        reasons=$(printf '%s' "$card" | jq -r "$FM_DECISION_CARD_JQ_DEFS"'
-          if stored_call_item then "" else (call_reasons | join("; ")) end' 2>/dev/null) \
-          || reasons='unreadable record'
-      else
-        reasons='unreadable record'
-      fi
-      if [ -n "$reasons" ]; then
-        printf 'ignored-store-card: %s (%s)\n' "$key" "$reasons" >&2
+      if ! read_store_card "$file"; then
+        printf 'ignored-store-card: %s (%s)\n' "$key" "$STORE_CARD_REASONS" >&2
         continue
       fi
+      card=$STORE_CARD
       if [ "$(jq -r '.card.key? // empty' "$file" 2>/dev/null)" != "$key" ]; then
         printf 'ignored-store-card: %s (record key does not match its file name)\n' "$key" >&2
         continue
@@ -435,6 +427,26 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
   return 1
 }
 
+# Read one durable record in its stored form: an fm-decision-card.v1 envelope
+# whose card passes `stored_call_item`, both owned by
+# bin/fm-decision-card-lib.sh. Sets STORE_CARD to the compact card and returns
+# 0, or sets STORE_CARD_REASONS for the caller's ignored-store-card line and
+# returns 1, so an envelope that names another schema is never merged.
+STORE_CARD=
+STORE_CARD_REASONS=
+read_store_card() {  # <file>
+  STORE_CARD=
+  STORE_CARD_REASONS=$(jq -r "$FM_DECISION_CARD_JQ_DEFS"'
+    if (envelope_reasons | length) > 0 then envelope_reasons | join("; ")
+    elif (.card | stored_call_item) then ""
+    else .card | call_reasons | join("; ") end' "$1" 2>/dev/null) \
+    || STORE_CARD_REASONS='unreadable record'
+  [ -z "$STORE_CARD_REASONS" ] || return 1
+  STORE_CARD=$(jq -c '.card' "$1" 2>/dev/null) && [ -n "$STORE_CARD" ] && return 0
+  STORE_CARD_REASONS='unreadable record'
+  return 1
+}
+
 # Drop every stale decision card, then give every surviving decision card the
 # standard reconcile choice. Injecting it here is what makes "every decision
 # card offers reconcile" a property of the board rather than of the composer's
@@ -445,24 +457,15 @@ merge_store_cards() {  # <data.json> <dest.json>
   # used only where the store holds nothing. Order is preserved, and a record
   # that fails the stored form of the shared contract is named on stderr and
   # skipped rather than failing the build.
-  local data=$1 dest=$2 key file stored reasons staged
+  local data=$1 dest=$2 key file staged
   cp -- "$data" "$dest" || return 1
   [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ] || return 0
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     file="$DECISION_CARDS_DIR/$key.json"
     [ -f "$file" ] && [ ! -L "$file" ] || continue
-    stored=$(jq -c '.card? // empty' "$file" 2>/dev/null) || stored=''
-    reasons=''
-    if [ -n "$stored" ]; then
-      reasons=$(printf '%s' "$stored" | jq -r "$FM_DECISION_CARD_JQ_DEFS"'
-        if stored_call_item then "" else (call_reasons | join("; ")) end' 2>/dev/null) \
-        || reasons='unreadable record'
-    else
-      reasons='unreadable record'
-    fi
-    if [ -n "$reasons" ]; then
-      printf 'ignored-store-card: %s (%s)\n' "$key" "$reasons" >&2
+    if ! read_store_card "$file"; then
+      printf 'ignored-store-card: %s (%s)\n' "$key" "$STORE_CARD_REASONS" >&2
       continue
     fi
     # A record answers for its own key only: a file whose card names another

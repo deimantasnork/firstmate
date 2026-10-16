@@ -4734,6 +4734,83 @@ test_card_refuses_a_closed_call() {
   pass "card refuses a closed call and leaves the stored record untouched"
 }
 
+# A flag-built card records the repository its task carries: the one hold
+# creates the task with from its origin or the default, the one an existing
+# backlog row already names, or, for a row that names none, the one the stored
+# card already holds. A card refresh never turns a known repository into null.
+test_card_records_the_task_repository() {
+  local home store
+  home=$(make_home card-repo)
+  store="$home/state/decision-cards"
+  printf 'project=%s/projects/sample\n' "$home" > "$home/state/sample-repo-origin.meta"
+  run_captain "$home" hold sample-origin-card --title "Decide the origin route" \
+    --reason "captain origin-route choice" --origin sample-repo-origin \
+    --card-title "Origin copy" --option "a:Option A" >/dev/null \
+    || fail "hold with an origin and a card failed"
+  jq -e '.card.repo == "sample"' "$store/sample-origin-card.json" >/dev/null \
+    || fail "a card for a task created from its origin lost the origin's repository"
+  run_captain "$home" hold sample-default-card --title "Decide the default route" \
+    --reason "captain default-route choice" --card-title "Default copy" \
+    --option "a:Option A" >/dev/null || fail "hold with a default-repository card failed"
+  jq -e '.card.repo == "firstmate"' "$store/sample-default-card.json" >/dev/null \
+    || fail "a card for a task created in the default repository recorded another one"
+  tasks_in "$home" add sample-row-card "Decide the row route" --repo sample >/dev/null \
+    || fail "could not add the backlog row fixture"
+  run_captain "$home" hold sample-row-card --reason "captain row-route choice" \
+    --card-title "Row copy" --option "a:Option A" >/dev/null \
+    || fail "hold with a card on an existing backlog row failed"
+  jq -e '.card.repo == "sample"' "$store/sample-row-card.json" >/dev/null \
+    || fail "a card on an existing backlog row lost the row's repository"
+  run_captain "$home" card sample-origin-card --card-title "Refreshed copy" \
+    --option "a:Option A" >/dev/null || fail "card did not refresh the origin call"
+  jq -e '.card.title == "Refreshed copy" and .card.repo == "sample"' \
+    "$store/sample-origin-card.json" >/dev/null \
+    || fail "a card refresh replaced the task's repository"
+  tasks_in "$home" add sample-bare-card "Decide the bare route" >/dev/null \
+    || fail "could not add the repository-less backlog row fixture"
+  jq -n '{key:"sample-bare-card", type:"decision", repo:"sample", title:"File copy",
+    options:[{value:"a", label:"Option A"}]}' > "$home/bare-card.json"
+  run_captain "$home" hold sample-bare-card --reason "captain bare-route choice" \
+    --card-file "$home/bare-card.json" >/dev/null || fail "hold with a card file failed"
+  run_captain "$home" card sample-bare-card --card-title "Flag copy" \
+    --option "a:Option A" >/dev/null || fail "card did not refresh the bare call"
+  jq -e '.card.title == "Flag copy" and .card.repo == "sample"' \
+    "$store/sample-bare-card.json" >/dev/null \
+    || fail "a card refresh dropped the stored card's repository"
+  pass "a flag-built card records its task's repository and a refresh keeps it"
+}
+
+# --card-file takes a card out of an envelope only when the envelope declares
+# fm-decision-card.v1, and the refusal lands before any mutation; a bare card
+# stays acceptable.
+test_card_file_refuses_an_envelope_of_another_schema() {
+  local home
+  home=$(make_home card-envelope)
+  jq -n '{schema:"fm-decision-card.v0", generated:"2026-08-19T00:00:00Z",
+    card:{key:"sample-envelope-card", type:"decision", repo:"sample", title:"File copy",
+      options:[{value:"a", label:"Option A"}]}}' > "$home/old-envelope.json"
+  if run_captain "$home" hold sample-envelope-card --title "Decide the envelope route" \
+      --reason "captain envelope choice" --card-file "$home/old-envelope.json" \
+      > "$home/out" 2> "$home/err"; then
+    fail "hold accepted an envelope that names another schema"
+  fi
+  assert_contains "$(cat "$home/err")" "envelope schema must be fm-decision-card.v1" \
+    "the refusal does not name the required schema"
+  assert_absent "$home/state/decision-cards/sample-envelope-card.json" \
+    "a refused envelope was still stored"
+  if grep -q "sample-envelope-card" "$home/data/backlog.md"; then
+    fail "a refused envelope still created the task"
+  fi
+  jq '.card' "$home/old-envelope.json" > "$home/bare-card.json"
+  run_captain "$home" hold sample-envelope-card --title "Decide the envelope route" \
+    --reason "captain envelope choice" --card-file "$home/bare-card.json" >/dev/null \
+    || fail "hold refused the same card supplied bare"
+  jq -e '.schema == "fm-decision-card.v1" and .card.title == "File copy"' \
+    "$home/state/decision-cards/sample-envelope-card.json" >/dev/null \
+    || fail "the bare card file was not stored as an fm-decision-card.v1 record"
+  pass "card file refuses an envelope of another schema and accepts a bare card"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
@@ -4793,3 +4870,5 @@ test_hold_writes_a_raise_time_decision_card
 test_hold_refuses_an_invalid_card_before_any_mutation
 test_card_rewrites_an_open_call_and_a_rehold_preserves_it
 test_card_refuses_a_closed_call
+test_card_records_the_task_repository
+test_card_file_refuses_an_envelope_of_another_schema

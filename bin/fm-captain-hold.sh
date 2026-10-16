@@ -943,7 +943,8 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 # Validation is fail-closed and runs before the hold's first mutation, so a
 # malformed card leaves the task, the backlog, and the store untouched. The
 # flag form and --card-file are mutually exclusive; a file is written verbatim
-# after validation, as a bare card or an fm-decision-card.v1 envelope.
+# after validation, as a bare card or an envelope, which must declare
+# fm-decision-card.v1.
 
 CARD_USED=0
 CARD_FILE=
@@ -985,23 +986,48 @@ card_flag_consume() {  # <argv...>; sets CARD_FLAG_ARGC when a card flag was con
   return 0
 }
 
-card_repo_for() {  # <task-id> <explicit-repo>; prints the card repo or nothing
-  local id=$1 explicit=$2 file value
-  if [ -n "$explicit" ]; then
-    printf '%s\n' "$explicit"
-    return 0
+# The repository `hold` creates a new captain task with: the explicit --repo,
+# else the origin's project, else firstmate.
+new_task_repo() {  # <explicit-repo> <origin-id>
+  local repo=$1 origin=$2
+  if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
+    repo=$(meta_value "$STATE/$origin.meta" project)
+    repo=${repo%/}
+    repo=${repo##*/}
   fi
+  printf '%s\n' "${repo:-firstmate}"
+}
+
+# The repository a flag-built card records: the explicit --repo, else the
+# task's own metadata, else the repository an existing backlog row already
+# names, else the one `hold` is about to create the task with. An existing row
+# that names none keeps the stored card's repository, so a `card` refresh never
+# turns a known repository into null. Runs outside a command substitution so a
+# backlog read that hits its bound still stops the command by name.
+CARD_REPO=
+resolve_card_repo() {  # <task-id> <explicit-repo> <origin-id>; sets CARD_REPO
+  local id=$1 origin=$3 file value
+  CARD_REPO=$2
+  [ -z "$CARD_REPO" ] || return 0
   file="$STATE/$id.meta"
   if [ -f "$file" ] && [ ! -L "$file" ]; then
     value=$(meta_value "$file" project)
     value=${value%/}
-    value=${value##*/}
-    if [ -n "$value" ]; then
-      printf '%s\n' "$value"
-      return 0
-    fi
+    CARD_REPO=${value##*/}
+    [ -z "$CARD_REPO" ] || return 0
   fi
-  printf '\n'
+  if task_show "$id"; then
+    CARD_REPO=$(show_field_value "$TASK_SHOW_OUTPUT" repo)
+    [ -z "$CARD_REPO" ] || return 0
+    file="$STATE/decision-cards/$id.json"
+    if [ -f "$file" ] && [ ! -L "$file" ]; then
+      CARD_REPO=$(jq -r "$FM_DECISION_CARD_JQ_DEFS"'
+        if (envelope_reasons | length) == 0 and (.card.repo | type) == "string"
+          then .card.repo else empty end' "$file" 2>/dev/null) || CARD_REPO=
+    fi
+    return 0
+  fi
+  CARD_REPO=$(new_task_repo '' "$origin")
 }
 
 validate_decision_card() {  # <card.json> <context>
@@ -1015,8 +1041,8 @@ validate_decision_card() {  # <card.json> <context>
   [ -z "$reasons" ] || fail "invalid $context: $reasons"
 }
 
-stage_authored_card() {  # <task-id> <title> <repo>; sets DECISION_CARD_TMP
-  local id=$1 title=$2 repo=$3 title_value
+stage_authored_card() {  # <task-id> <title> <explicit-repo> <origin-id>; sets DECISION_CARD_TMP
+  local id=$1 title=$2 repo=$3 origin=$4 title_value envelope
   DECISION_CARD_TMP=
   [ "$CARD_USED" -eq 1 ] || return 0
   if [ -n "$CARD_FILE" ]; then
@@ -1027,9 +1053,13 @@ stage_authored_card() {  # <task-id> <title> <repo>; sets DECISION_CARD_TMP
     [ "$CARD_FREEFORM" -eq 1 ] \
       || fail "--card-file cannot be combined with --no-freeform; put everything in the file"
     [ -f "$CARD_FILE" ] && [ ! -L "$CARD_FILE" ] || fail "card file does not exist: $CARD_FILE"
+    envelope=$(jq -r "$FM_DECISION_CARD_JQ_DEFS"'
+      if card_envelope then envelope_reasons | join("; ") else "" end' "$CARD_FILE" 2>/dev/null) \
+      || fail "card file is not a JSON card: $CARD_FILE"
+    [ -z "$envelope" ] || fail "invalid card file $CARD_FILE: $envelope"
     DECISION_CARD_TMP=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-card.XXXXXX") \
       || fail "cannot stage the decision card"
-    if ! jq -c 'if type == "object" and has("card") then .card else . end' "$CARD_FILE" \
+    if ! jq -c "$FM_DECISION_CARD_JQ_DEFS"'if card_envelope then .card else . end' "$CARD_FILE" \
         > "$DECISION_CARD_TMP"; then
       rm -f -- "$DECISION_CARD_TMP"
       DECISION_CARD_TMP=
@@ -1039,10 +1069,11 @@ stage_authored_card() {  # <task-id> <title> <repo>; sets DECISION_CARD_TMP
   else
     title_value=${CARD_TITLE:-$title}
     [ -n "$title_value" ] || fail "--card-title (or --title) is required with the card flags"
+    resolve_card_repo "$id" "$repo" "$origin"
     DECISION_CARD_TMP=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-card.XXXXXX") \
       || fail "cannot stage the decision card"
     if ! jq -n \
-        --arg key "$id" --arg title "$title_value" --arg repo "$repo" \
+        --arg key "$id" --arg title "$title_value" --arg repo "$CARD_REPO" \
         --arg type "${CARD_TYPE:-decision}" --arg about "$CARD_ABOUT" \
         --arg decide "$CARD_DECIDE" --arg detail "$CARD_DETAIL" \
         --arg options "$CARD_OPTIONS" --arg recommend "$CARD_RECOMMEND" \
@@ -1138,7 +1169,7 @@ command_hold() {
   # The card is staged and validated before the lock and before every
   # mutation, so a malformed card leaves the task, the backlog, and the store
   # exactly as they were.
-  stage_authored_card "$id" "$title" "$(card_repo_for "$id" "$repo")"
+  stage_authored_card "$id" "$title" "$repo" "$origin"
   acquire_task_control_lock "$id"
   require_tasks_axi
   if task_show "$id"; then
@@ -1158,12 +1189,7 @@ command_hold() {
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
-    if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
-      repo=$(meta_value "$STATE/$origin.meta" project)
-      repo=${repo%/}
-      repo=${repo##*/}
-    fi
-    [ -n "$repo" ] || repo=firstmate
+    repo=$(new_task_repo "$repo" "$origin")
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     # tasks-axi add never passes --due. Beads due.required would refuse this
@@ -1231,7 +1257,7 @@ command_card() {  # <task-id> <card flags>
   done
   validate_slug task-id "$id"
   [ "$CARD_USED" -eq 1 ] || fail "card needs --card-file or the card flags"
-  stage_authored_card "$id" "" "$(card_repo_for "$id" '')"
+  stage_authored_card "$id" "" "" ""
   # The open check runs under the same task lock answer takes, so a call closed
   # while this command waited cannot receive a card afterwards.
   acquire_task_control_lock "$id"
