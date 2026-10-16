@@ -255,7 +255,12 @@ compose_payload() {  # <dest.json>
     done
   fi
   if [ "$extra" != '[]' ]; then
-    if ! jq --argjson extra "$extra" '.captains_call += $extra' "$tmp" > "$tmp.next"; then
+    if ! jq --argjson extra "$extra" '
+      ($extra | map(.key | sub("^merge\\."; ""))) as $replaced
+      | .captains_call = ([.captains_call[]
+          | . as $card
+          | select(($replaced | index($card.key)) == null)] + $extra)' \
+        "$tmp" > "$tmp.next"; then
       rm -f -- "$tmp" "$tmp.next"
       fail "cannot add the durable decision cards to the composed payload"
     fi

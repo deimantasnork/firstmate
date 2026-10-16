@@ -1125,8 +1125,11 @@ test_refresh_ignores_a_store_envelope_of_another_schema() {
   FM_BEARINGS_BOARD_SNAPSHOT="$stub" run_board "$home" refresh >/dev/null \
     || fail "refresh failed with a valid stored card"
   extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
-  jq -e --arg key "$key" '[.captains_call[].key] | index($key) != null' "$home/served.json" >/dev/null \
-    || fail "the control fm-decision-card.v1 record was not merged by refresh"
+  jq -e --arg key "$key" '
+    [.captains_call[].key] == [$key]
+    and ((.captains_call[] | select(.key == $key) | .title) == "Raise-time storage choice")' \
+    "$home/served.json" >/dev/null \
+    || fail "refresh did not replace the fallback with exactly one stored merge card"
   stash_store_card "$home" "$key"
   jq '.schema = "fm-decision-card.v0"' "$home/state/decision-cards/$key.json" > "$home/old.json"
   mv -f -- "$home/old.json" "$home/state/decision-cards/$key.json"
@@ -1138,8 +1141,8 @@ test_refresh_ignores_a_store_envelope_of_another_schema() {
   assert_contains "$out" "ignored-store-card: $key (envelope schema must be fm-decision-card.v1)" \
     "refresh did not name the old-schema record: $out"
   extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
-  jq -e --arg key "$key" '[.captains_call[].key] | index($key) == null' "$home/served.json" >/dev/null \
-    || fail "an old-schema stored record still reached the board payload"
+  jq -e '[.captains_call[].key] == ["sample-open-call"]' "$home/served.json" >/dev/null \
+    || fail "refresh did not retain exactly the fallback for an old-schema stored record"
   pass "refresh ignores a store envelope that names another schema"
 }
 
