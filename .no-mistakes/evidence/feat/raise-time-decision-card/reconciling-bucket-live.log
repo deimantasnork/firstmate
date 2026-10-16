@@ -1,0 +1,2 @@
+ok - a reconcile-requested captain call leaves Captain's Call and is disclosed as a gate
+ok - a malformed reconcile request neither hides nor blocks a live call

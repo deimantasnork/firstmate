@@ -1,0 +1,4 @@
+ok - hold writes the raise-time decision card into the durable store
+ok - hold refuses an invalid card before any mutation
+ok - card rewrites an open call and a re-hold preserves the stored copy
+ok - card refuses a closed call and leaves the stored record untouched

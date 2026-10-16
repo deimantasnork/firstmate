@@ -1,0 +1,8 @@
+ok - build persists the effective decision cards for later readers
+ok - build persists exactly one store card for a duplicated captain-call key
+ok - build merges the durable card store first for its key
+ok - build ignores a malformed store card and keeps the payload copy
+ok - refresh composes the snapshot rows and merges the stored decision card
+ok - refresh skips a malformed stored card and keeps the board current
+ok - refresh keeps a deferred hold's card out of Captain's Call
+ok - refresh refuses a broken snapshot before touching the board
