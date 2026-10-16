@@ -136,6 +136,9 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 # shellcheck source=bin/fm-decision-card-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-decision-card-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 SNAPSHOT_BIN="${FM_BEARINGS_BOARD_SNAPSHOT:-$SCRIPT_DIR/fm-bearings-snapshot.sh}"
@@ -556,6 +559,46 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
 # the card hygiene above.
 
 DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
+DECISION_CARD_LOCKS=()
+
+release_decision_card_locks() {
+  local index lock rc=0
+  index=${#DECISION_CARD_LOCKS[@]}
+  while [ "$index" -gt 0 ]; do
+    index=$((index - 1))
+    lock=${DECISION_CARD_LOCKS[$index]}
+    fm_lock_release "$lock" || rc=1
+    unset 'DECISION_CARD_LOCKS[index]'
+  done
+  return "$rc"
+}
+
+bearings_board_cleanup() {
+  release_decision_card_locks || true
+}
+trap bearings_board_cleanup EXIT
+
+acquire_decision_card_locks() {  # <payload.json>
+  local data=$1 file key lock
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
+    lock="$STATE/.control-$key.lock"
+    fm_lock_acquire_wait "$lock" || return 1
+    DECISION_CARD_LOCKS[${#DECISION_CARD_LOCKS[@]}]=$lock
+  done < <(
+    {
+      jq -r '.captains_call[]?.key' "$data"
+      if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
+        for file in "$DECISION_CARDS_DIR"/*.json; do
+          [ -f "$file" ] && [ ! -L "$file" ] || continue
+          key=$(basename "$file" .json)
+          printf '%s\n' "$key"
+        done
+      fi
+    } | LC_ALL=C sort -u
+  )
+}
 
 persist_decision_cards() {  # <effective-payload.json>
   local data=$1 key card tmp existing task rc keep=''
@@ -629,6 +672,8 @@ command_build() {
 
   effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
     || fail "cannot stage the board payload"
+  acquire_decision_card_locks "$data" \
+    || { rm -f -- "$effective"; fail "cannot lock the decision-card store"; }
   if ! effective_payload "$data" "$effective"; then
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
@@ -637,6 +682,8 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot persist the decision cards under $DECISION_CARDS_DIR"
   }
+  release_decision_card_locks \
+    || { rm -f -- "$effective"; fail "cannot unlock the decision-card store"; }
   json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every

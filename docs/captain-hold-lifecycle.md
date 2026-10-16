@@ -405,6 +405,7 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 | `hold_bucket` | Where the hold appears |
 | --- | --- |
 | `live` | A default Captain's Call entry. |
+| `reconciling` | Leaves the default Captain's Call, renders as a Charted Next gate stating `reconcile requested <timestamp>: <hold reason>`, and contributes to the concrete `omitted[]` disclosure. |
 | `blocked`, `dated`, or `aged` | Leaves the default Captain's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
 
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.

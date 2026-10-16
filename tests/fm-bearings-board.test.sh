@@ -901,6 +901,56 @@ test_build_merges_the_durable_card_store_first() {
   pass "build merges the durable card store first for its key"
 }
 
+test_build_serializes_store_merge_and_persistence_with_card_writers() {
+  local home data key lock acquired release locker_pid build_pid published=0
+  home=$(make_home store-writer-race)
+  data="$home/payload.json"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  lock="$home/state/.control-$key.lock"
+  acquired="$home/lock-acquired"
+  release="$home/release-lock"
+  write_valid_payload "$data"
+
+  STATE="$home/state" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$acquired" "$release" &
+  locker_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$acquired" ] && break
+    sleep 0.05
+  done
+  [ -e "$acquired" ] || fail "the card writer fixture did not acquire the task lock"
+
+  run_board "$home" build "$data" > "$home/build.out" 2>&1 &
+  build_pid=$!
+  for _ in $(seq 1 20); do
+    if [ -e "$home/.lavish/bearings-board.html" ]; then
+      published=1
+      break
+    fi
+    sleep 0.05
+  done
+  stash_store_card "$home" "$key"
+  : > "$release"
+  wait "$locker_pid" || fail "the card writer fixture did not release the task lock"
+  wait "$build_pid" || fail "the serialized board build failed: $(cat "$home/build.out")"
+
+  [ "$published" -eq 0 ] || fail "the board published while the card writer held the task lock"
+  extract_payload "$home/.lavish/bearings-board.html" > "$home/served.json"
+  jq -e --arg key "$key" '
+    (.captains_call[] | select(.key == $key) | .title) == "Raise-time storage choice"' \
+    "$home/served.json" >/dev/null \
+    || fail "the build did not preserve the card published before the task lock was released"
+  jq -e '.card.title == "Raise-time storage choice"' \
+    "$home/state/decision-cards/$key.json" >/dev/null \
+    || fail "the build overwrote the card published before the task lock was released"
+  pass "build serializes card-store merge and persistence with raise-time writers"
+}
+
 test_build_ignores_a_malformed_store_card_without_failing() {
   local home data store key out
   home=$(make_home store-malformed)
@@ -1096,6 +1146,7 @@ test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
 test_build_merges_the_durable_card_store_first
 test_build_ignores_a_malformed_store_card_without_failing
+test_build_serializes_store_merge_and_persistence_with_card_writers
 test_refresh_composes_from_the_snapshot_and_merges_the_store_card
 test_refresh_ignores_a_malformed_store_card
 test_build_ignores_a_store_envelope_of_another_schema
