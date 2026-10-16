@@ -22,21 +22,24 @@
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
-#     and hold_bucket fields.
-#     Repeated blocker tokens remain ordered; a blocker resolves only when its
-#     structured record is Done, and missing ids stay open.
+#     reconcile_requested, and hold_bucket fields.
+#     Repeated blocker tokens remain ordered; a blocker resolves when its
+#     structured record is Done or its id is archived in data/done-archive.md,
+#     and missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
-#     only from structured fields - state, hold_kind, hold_until,
-#     unresolved_blocker_ids, and the machine-written hold-set timestamp. No
-#     hold reason or body prose is ever matched. The buckets are total and
-#     mutually exclusive, so every captain hold lands in exactly one and none
-#     can fall through: "blocked" when any blocker is unresolved, else "dated"
-#     when hold_until is still in the future, else "aged" when an undated hold
-#     is at least FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; legacy
-#     unstamped holds fall back to `since`), else "live". A non-captain or Done
-#     row carries null.
+#     only from structured fields - state, hold_kind, a validated pending
+#     reconcile request, hold_until, unresolved_blocker_ids, and the
+#     machine-written hold-set timestamp. No hold reason or body prose is ever
+#     matched. The buckets are total and mutually exclusive, so every captain
+#     hold lands in exactly one and none can fall through: "reconciling" while
+#     a board-created reconcile request is pending, else "blocked" when any
+#     blocker is unresolved, else "dated" when hold_until is still in the
+#     future, else "aged" when an undated hold is at least
+#     FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; legacy unstamped
+#     holds fall back to `since`), else "live". A non-captain or Done row
+#     carries null.
 #     captain_actionable means "waiting on the captain now" and is exactly
 #     hold_bucket == "live".
 #     hold_age_days is the hold's age when computable, else null.
@@ -253,9 +256,10 @@ terminal_in_flight; they never have backlog rows.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
-hold_bucket, hold_age_days, and plural blocker fields for downstream
-projections. A captain hold is actionable only when every blocker is Done, any
-hold-until date has arrived, and an undated hold remains below the aging threshold.
+hold_bucket, hold_age_days, reconcile_requested, and plural blocker fields for
+downstream projections. A captain hold is actionable only when no reconcile
+request is pending, every blocker is Done, any hold-until date has arrived, and
+an undated hold remains below the aging threshold.
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Every sampled remote home's state/home-summary.json is fetched concurrently
@@ -280,7 +284,9 @@ The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
 FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 Every captain hold carries hold_bucket, decided only from structured fields and
-never from hold reason or body prose: "blocked", "dated", "aged", or "live".
+never from hold reason or body prose: "reconciling" while a validated pending
+board-created reconcile request exists, else "blocked", "dated", "aged", or
+"live", in that order.
 An undated hold ages once its hold-set timestamp is at least
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; 0 ages every hold with a
 non-negative computed age); legacy holds without a stamp fall back to their

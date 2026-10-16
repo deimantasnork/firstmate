@@ -2,9 +2,9 @@
 # Shared fm-decision-card.v1 contract for an authored captain-call card.
 # Usage: . bin/fm-decision-card-lib.sh; splice "$FM_DECISION_CARD_JQ_DEFS"
 # ahead of a jq program, then test a card with `call_item`, name the first
-# broken invariant with `call_reasons`, accept a durable record that already
-# carries the injected reconcile choice with `stored_call_item`, or name why a
-# record is not an fm-decision-card.v1 envelope with `envelope_reasons`.
+# broken invariant with `call_reasons`, accept a durable record written by
+# either store writer with `stored_call_item`, or name why a record is not an
+# fm-decision-card.v1 envelope with `envelope_reasons`.
 #
 # ONE OWNER for the authored-card contract. Three surfaces answer the same
 # question - "is this a well-formed card the captain can be shown": the payload
@@ -16,8 +16,9 @@
 # The authored form reserves the `reconcile` option value: the board build
 # injects that choice itself on every decision card, so an author - an agent or
 # a flag - must never supply it. `stored_call_item` is the reader-side form for
-# the durable store, whose records are the EFFECTIVE cards and therefore carry
-# that injected choice exactly once.
+# the durable store: a raise-time record is the authored card and carries no
+# reconcile choice yet, while a record the board build wrote is the EFFECTIVE
+# card and carries the injected choice exactly once.
 #
 # The durable record wraps that card as {schema, generated, card}. Any object
 # carrying `card` is such an envelope and must declare fm-decision-card.v1, so

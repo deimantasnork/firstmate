@@ -15,11 +15,13 @@
 #
 # compose    Write a deterministic fm-bearings-board.v1 payload built from the
 #            canonical snapshot (bin/fm-bearings-snapshot.sh --json): the fleet
-#            rows, one fallback card per open captain call, and nothing an
-#            agent would have to judge. The fallback card carries the call's
-#            durable summary as its title, no options, and freeform answers
-#            only; the raise-time card in the durable store is merged first by
-#            build, so it supplies the real options whenever one was written.
+#            rows, one card per open captain call, and nothing an agent would
+#            have to judge. A call's card is a fallback carrying its durable
+#            summary as the title, no options, and freeform answers only,
+#            unless the durable store already holds that call's card: a stored
+#            merge.<task> card replaces the fallback here, and build's
+#            store-first merge supplies the raise-time record's real options
+#            whenever one was written.
 #            A Charted Next gate is composed dispatchable=false and only the
 #            parenthesized sentinel ids are classified as warnings, because
 #            the snapshot proves neither a cleared blocker-and-time gate nor a

@@ -38,9 +38,10 @@
 # buckets are total and mutually exclusive, so every captain hold appears in
 # exactly one decision bucket and none can fall through both. An actively worked
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
-# entry; "blocked", "dated", and "aged" leave the default Captain's Call, render
-# as Charted Next gates stating why (the blocking work, the until date, or the
-# floored age), and are counted in omitted[].
+# entry; "reconciling", "blocked", "dated", and "aged" leave the default
+# Captain's Call, render as Charted Next gates stating why (the pending
+# reconcile request, the blocking work, the until date, or the floored age),
+# and are counted in omitted[].
 # --all-decisions reveals every captain hold available within the bounded snapshot
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
 # Aging is a projection safety net only; the durable
@@ -148,7 +149,7 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,owner,title,reason}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates

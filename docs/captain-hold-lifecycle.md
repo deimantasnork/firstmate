@@ -144,7 +144,8 @@ A record that is not an `fm-decision-card.v1` envelope, fails the stored form of
 Because the store is authoritative for its keys, refining a card's copy uses `bin/fm-captain-hold.sh card`, not a payload rewrite.
 
 **The deterministic floor.**
-`bin/fm-bearings-board.sh refresh` composes the fleet rows and one fallback card per open call from the canonical snapshot and then builds, so a raised call, a new landed row, or a changed live stage reaches the board without an agent turn.
+`bin/fm-bearings-board.sh refresh` composes the fleet rows and one card per open call from the canonical snapshot and then builds, so a raised call, a new landed row, or a changed live stage reaches the board without an agent turn.
+A call whose durable store already holds a card keeps that card instead of the composed fallback, so a refresh never publishes a bare duplicate beside the authored options.
 It never invents the richer copy or the dispatch picker a `/bearings lavish` composition owns.
 It composes every Charted Next gate with `dispatchable=false` and classifies warnings only by parenthesized sentinel ids because the snapshot proves neither a cleared blocker-and-time gate nor a richer kind, and prose is never read to guess either.
 
