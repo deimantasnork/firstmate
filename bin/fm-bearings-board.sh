@@ -560,15 +560,17 @@ landed_drop_and_inject() {  # <data.json> <dest.json>
 
 DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
 DECISION_CARD_LOCKS=()
+DECISION_CARD_LOCK_COUNT=0
 
 release_decision_card_locks() {
   local index lock rc=0
-  index=${#DECISION_CARD_LOCKS[@]}
+  index=$DECISION_CARD_LOCK_COUNT
   while [ "$index" -gt 0 ]; do
     index=$((index - 1))
     lock=${DECISION_CARD_LOCKS[$index]}
     fm_lock_release "$lock" || rc=1
-    unset 'DECISION_CARD_LOCKS[index]'
+    unset "DECISION_CARD_LOCKS[$index]"
+    DECISION_CARD_LOCK_COUNT=$index
   done
   return "$rc"
 }
@@ -585,7 +587,8 @@ acquire_decision_card_locks() {  # <payload.json>
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     lock="$STATE/.control-$key.lock"
     fm_lock_acquire_wait "$lock" || return 1
-    DECISION_CARD_LOCKS[${#DECISION_CARD_LOCKS[@]}]=$lock
+    DECISION_CARD_LOCKS[DECISION_CARD_LOCK_COUNT]=$lock
+    DECISION_CARD_LOCK_COUNT=$((DECISION_CARD_LOCK_COUNT + 1))
   done < <(
     {
       jq -r '.captains_call[]?.key' "$data"
