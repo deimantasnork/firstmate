@@ -690,12 +690,20 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# One shared string keeps the ship and scout shell-path rule identical.
+IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
+8. Never start a shell command with `cd`, and never run a search whose path depends on the current directory.
+   Use absolute paths, `git -C <abs>`, or a `( cd <abs> && ... )` subshell.
+   Pass this rule to every sub-agent you launch.
+EOF
+SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
+
 # One shared string for the host's memory-slotted command wrapper: hertzner-server-1
 # runs every project inside systemd slices, so an unwrapped test, build or dev
 # server can starve production; `heavy` gives each command its own box and
 # queues the rest.
 IFS= read -r -d '' SERVER_RESOURCES_RULE <<'EOF' || true
-8. Run memory-hungry commands through `heavy`: tests (`heavy pnpm test`, `heavy <vitest or playwright command>`), builds (`heavy pnpm build`) and dev servers (`heavy -- next dev`).
+9. Run memory-hungry commands through `heavy`: tests (`heavy pnpm test`, `heavy <vitest or playwright command>`), builds (`heavy pnpm build`) and dev servers (`heavy -- next dev`).
    At most 2 run at once across the fleet; the rest wait their turn and show what they are waiting for, and waiting is normal - never unwrap a command or retry it to start sooner.
    This is the host's resource rule on hertzner-server-1; details: `/opt/server-resources/README.md` and `server-budget`.
 EOF
@@ -749,6 +757,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $SERVER_RESOURCES_RULE
 
@@ -841,6 +850,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $SERVER_RESOURCES_RULE
 
