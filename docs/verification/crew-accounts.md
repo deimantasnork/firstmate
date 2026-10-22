@@ -59,7 +59,7 @@ The deterministic half is pinned by `tests/fm-codex-models-lib.test.sh` and the 
 
 ## Selection outcome on a two-store fleet
 
-Run against two local stores whose configuration shape is the one in `docs/examples/crew-accounts.json`:
+Run against two local stores whose accounts are shaped like the ones in `docs/examples/crew-accounts.json`, with `rotation` left at its fill-first default:
 
 ```sh
 bin/fm-account-choose.sh --vendor codex

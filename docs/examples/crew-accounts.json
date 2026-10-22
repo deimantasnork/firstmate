@@ -1,4 +1,5 @@
 {
+  "rotation": "round-robin",
   "accounts": [
     {
       "name": "primary",
@@ -9,7 +10,10 @@
       "name": "secondary",
       "codex_home": "/home/me/.codex-secondary",
       "claude_config_dir": "/home/me/.claude-secondary",
-      "reserve": { "claude": 20 }
+      "reserve": { "claude": 20 },
+      "model_substitutions": {
+        "claude-fable-5-1": { "model": "claude-opus-5-5", "ultracode": true }
+      }
     }
   ]
 }
