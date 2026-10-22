@@ -29,6 +29,17 @@
 # disclosed uncertainty, never a block, so such an account with a reserve below
 # 100 stays selectable and is reported as `measured=no`.
 #
+# config/crew-accounts.json may set a top-level "rotation". The default,
+# "fill-first", is the behavior above: the first eligible account in declaration
+# order is chosen until it drains. "round-robin" instead starts each dispatch at
+# the next account in declaration order, so consecutive dispatches of one vendor
+# spend different subscriptions instead of draining one. The start position
+# persists in state/.account-rotation-<vendor> and advances only when a dispatch
+# selects an account. Eligibility is unchanged: a closed or disqualified account
+# is still skipped, and the search continues in order from the start position. A
+# --prefer account keeps its fixed first place, so a secondmate's recorded store
+# never rotates.
+#
 # --model <name> names the model a codex dispatch will launch (codex only, since
 # a Codex store carries its own installed model catalog). Each candidate's own
 # catalog is then read before its quota, through fm_codex_catalog_models in
@@ -107,12 +118,15 @@
 #                       specialized setup, the same override the other scripts
 #                       honor)
 #   FM_ACCOUNT_PROBE_TIMEOUT  hard per-store probe bound in seconds (default 20)
+#   FM_ACCOUNT_ROTATION_STATE  directory holding the round-robin counter
+#                       (default $FM_HOME/state)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+ROTATION_STATE="${FM_ACCOUNT_ROTATION_STATE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
@@ -260,11 +274,15 @@ config_schema_error() {
       and ($p | test("^(/|~$|~/)"))
       and (($p | [explode[] | select(. < 32)] | length) == 0);
     def field_ok($e):
-      ["name", "reserve"] + store_fields | index($e.key) != null;
+      ["name", "reserve", "model_substitutions"] + store_fields | index($e.key) != null;
+    def rotation_ok:
+      (.rotation == "fill-first") or (.rotation == "round-robin");
     if type != "object" then "top-level value must be an object"
     elif has("reserve") then "reserve must be set per account (accounts[].reserve), not at the top level"
-    elif ([keys[] | select(. != "accounts")] | length) > 0
-      then "top-level keys must be accounts only (got: " + ([keys[] | select(. != "accounts")] | join(", ")) + ")"
+    elif ([keys[] | select(. != "accounts" and . != "rotation")] | length) > 0
+      then "top-level keys must be accounts and rotation only (got: " + ([keys[] | select(. != "accounts" and . != "rotation")] | join(", ")) + ")"
+    elif has("rotation") and ((.rotation | type) != "string" or (rotation_ok | not))
+      then "rotation must be fill-first or round-robin"
     elif (.accounts | type) != "array" then "accounts must be an array"
     else
     .accounts as $accounts |
@@ -277,7 +295,7 @@ config_schema_error() {
     elif ([$accounts[] | select((has("codex_home") | not) and (has("claude_config_dir") | not))] | length) > 0
       then "each account needs codex_home, claude_config_dir, or both"
     elif ([$accounts[] | to_entries[] | select(field_ok(.) | not)] | length) > 0
-      then "each account accepts only name, codex_home, claude_config_dir, and reserve"
+      then "each account accepts only name, codex_home, claude_config_dir, reserve, and model_substitutions"
     elif ([$accounts[] | to_entries[] | select(.key as $k | (store_fields | index($k)) != null) | select((path_ok(.value) | not))] | length) > 0
       then "each store path must be absolute or start with ~/ and carry no control character"
     elif ([$accounts[] | select(has("reserve") and ((.reserve | type) != "object"))] | length) > 0
@@ -286,6 +304,19 @@ config_schema_error() {
       then "account reserve names a vendor other than codex or claude"
     elif ([$accounts[] | .reserve // {} | to_entries[] | select((.value | type) != "number" or .value < 0 or .value > 100)] | length) > 0
       then "each account reserve must be a number from 0 through 100"
+    elif ([$accounts[] | select(has("model_substitutions")) | select(
+        if (.model_substitutions | type) != "object" then true
+        else ([.model_substitutions | to_entries[] | select(
+            (.key | length) == 0
+            or (.value | if type == "object" then
+                 ((.model // "") | type) != "string"
+                 or ((.model // "") | length) == 0
+                 or (has("ultracode") and ((.ultracode | type) != "boolean"))
+               else true end)
+          )] | length) > 0
+        end
+      )] | length) > 0
+      then "each account model_substitutions must map a model name to an object with a model string and an optional boolean ultracode"
     else empty
     end
     end
@@ -376,6 +407,36 @@ account_candidates() {  # <vendor>
     printf 'error: %s could not be read\n' "$CONFIG_FILE" >&2
     exit 1
   }
+}
+
+# The configured rotation mode; an absent key keeps fill-first.
+rotation_mode() {
+  jq -r '.rotation // "fill-first"' "$CONFIG_FILE" 2>/dev/null
+}
+
+# The persisted round-robin position for one vendor. A missing, empty, or
+# malformed file reads as position 0, so a home that never rotated starts at
+# the first account in declaration order.
+rotation_slot() {  # <vendor>
+  local file slot
+  file="$ROTATION_STATE/.account-rotation-$1"
+  slot=$(head -n 1 "$file" 2>/dev/null | tr -cd '0-9')
+  printf '%s\n' "${slot:-0}"
+}
+
+# Move one vendor's position forward by one. Called only after a selection, so a
+# refused dispatch does not consume a turn and the next attempt retries the same
+# starting account.
+advance_rotation() {  # <vendor>
+  local file slot tmp
+  file="$ROTATION_STATE/.account-rotation-$1"
+  slot=$(rotation_slot "$1")
+  mkdir -p "$ROTATION_STATE" 2>/dev/null || return 0
+  tmp="$file.tmp.$$"
+  if printf '%s\n' "$((slot + 1))" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  fi
+  return 0
 }
 
 # ---- quota evidence ----------------------------------------------------------
@@ -602,6 +663,20 @@ if [ "${#CANDIDATES[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# Round-robin rotates the starting point through the declaration order; a
+# preferred account keeps its fixed first place and never rotates.
+ROTATE=no
+if [ -z "$PREFER" ] && [ "$(rotation_mode)" = round-robin ]; then
+  ROTATE=yes
+fi
+if [ "$ROTATE" = yes ] && [ "${#CANDIDATES[@]}" -gt 1 ]; then
+  offset=$(( $(rotation_slot "$VENDOR") % ${#CANDIDATES[@]} ))
+  if [ "$offset" -gt 0 ]; then
+    ROTATED=("${CANDIDATES[@]:offset}" "${CANDIDATES[@]:0:offset}")
+    CANDIDATES=("${ROTATED[@]}")
+  fi
+fi
+
 CANDIDATE_LINES=()
 SELECTED=
 SELECTED_STORE=
@@ -681,6 +756,8 @@ if [ -z "$SELECTED" ]; then
   printf 'error: no %s account is usable: every configured account was closed by its reserve or disqualified on measured evidence\n' "$VENDOR" >&2
   exit 3
 fi
+
+[ "$ROTATE" = yes ] && advance_rotation "$VENDOR"
 
 emit_selection "$SELECTED" "$SELECTED_STORE" "$SELECTED_MEASURED" "$SELECTED_PCT" \
   "$SELECTED_RUNWAY" "$SELECTED_IDENTITY" no "$SELECTED_ADVERTISED"

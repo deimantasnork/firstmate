@@ -634,6 +634,37 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+test_account_model_substitution_serves_a_missing_model() {
+  local rec id out status launch meta
+  id=profile-substitute-z2s
+  rec=$(make_spawn_case profile-substitute claude "$id")
+  read_case_record "$rec"
+  write_account_store "$CASE_DIR/store-primary" "$(account_store_json claude 50 through_reset)"
+  write_account_store "$CASE_DIR/store-secondary" "$(account_store_json claude 50 through_reset)"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  cat > "$HOME_DIR/config/crew-accounts.json" <<JSON
+{
+  "accounts": [
+    { "name": "primary", "claude_config_dir": "$CASE_DIR/store-primary" },
+    { "name": "secondary", "claude_config_dir": "$CASE_DIR/store-secondary",
+      "model_substitutions": { "claude-fable-5-1": { "model": "claude-opus-5-5", "ultracode": true } } }
+  ]
+}
+JSON
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-fable-5-1 --effort xhigh --account secondary)
+  status=$?
+  expect_code 0 "$status" "a substituted account must spawn"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'claude-opus-5-5'" "the substitution model did not reach the launch"
+  assert_not_contains "$launch" "claude-fable-5-1" "the missing model still reached the launch"
+  assert_contains "$launch" '"ultracode":true' "the ultracode setting did not reach the launch"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "model=claude-opus-5-5" "$meta" "the effective model was not recorded"
+  pass "an account model substitution serves the profile with its own model"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -2738,7 +2769,7 @@ test_secondmate_home_crewmate_runs_on_the_home_store_not_the_ambient_one() {
   pass "a secondmate home's crewmates run on the home's recorded stores, never the ambient ones, while a primary home is unchanged"
 }
 
-test_secondmate_home_stays_on_its_recorded_stores() {
+test_secondmate_home_with_its_own_accounts_rotates_its_crewmates() {
   local rec id out status launch meta codex_a codex_b claude_a claude_b
   id=account-secondmate-home-z9e
   rec=$(make_spawn_case account-secondmate-home codex "$id")
@@ -2753,8 +2784,8 @@ test_secondmate_home_stays_on_its_recorded_stores() {
   write_account_store "$claude_b" "$(account_store_json claude 80 through_reset)"
   write_accounts_config "$HOME_DIR" "$codex_a" "$codex_b" "$claude_a" "$claude_b"
   install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
-  # This home IS a secondmate home whose parent pinned it to the first account,
-  # so it never re-selects, even though that account now reads exhausted.
+  # A local home with its own account file selects like any home, so the
+  # parent's recorded account is a starting point, not a permanent pin.
   bind_secondmate_home_record "$HOME_DIR" home-mate "$CASE_DIR/parent" \
     account_codex=primary "codex_home=$codex_a"
 
@@ -2762,11 +2793,11 @@ test_secondmate_home_stays_on_its_recorded_stores() {
   status=$?
   expect_code 0 "$status" "a secondmate home's crewmate should still spawn"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CODEX_HOME='$codex_a'" "a secondmate home's crewmate left the home's recorded store"
-  assert_not_contains "$launch" "$codex_b" "a secondmate home's crewmate re-selected an account"
+  assert_contains "$launch" "CODEX_HOME='$codex_b'" "an exhausted recorded account blocked the home's own selection"
+  assert_not_contains "$launch" "CODEX_HOME='$codex_a'" "an exhausted recorded account still reached the launch"
   meta="$HOME_DIR/state/$id.meta"
-  assert_grep "account=primary" "$meta" "the home's recorded account was not recorded on the task record"
-  [ ! -s "$CASE_DIR/quota.log" ] || fail "a secondmate home auto-probed the account stores: $(cat "$CASE_DIR/quota.log")"
+  assert_grep "account=secondary" "$meta" "the home's own selection was not recorded on the task record"
+  [ -s "$CASE_DIR/quota.log" ] || fail "the home did not measure its own accounts"
 
   # An explicit pin is still firstmate's or the captain's decision, so it wins.
   out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" \
@@ -2776,7 +2807,33 @@ test_secondmate_home_stays_on_its_recorded_stores() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CODEX_HOME='$codex_b'" "the explicit pin was not forwarded inside the secondmate home"
   assert_grep "account_pin=yes" "$meta" "the explicit pin inside a secondmate home was not recorded as one"
-  pass "a secondmate home stays on its recorded store and still honors an explicit pin"
+  pass "a secondmate home with its own account file rotates its crewmates and still honors an explicit pin"
+}
+
+test_secondmate_home_without_its_own_accounts_keeps_the_recorded_store() {
+  local rec id out status launch meta codex_a codex_b
+  id=account-secondmate-recorded-z9r
+  rec=$(make_spawn_case account-secondmate-recorded codex "$id")
+  read_case_record "$rec"
+  codex_a="$CASE_DIR/store-codex-a"
+  codex_b="$CASE_DIR/store-codex-b"
+  write_account_store "$codex_a" "$(account_store_json codex 0 exhausted_now)"
+  write_account_store "$codex_b" "$(account_store_json codex 87 through_reset)"
+  install_quota_axi_fake "$FAKEBIN_DIR" "$CASE_DIR/quota.log"
+  # No account file of its own: the parent's record is the only identity this
+  # home has, so it stays on that store unmeasured.
+  bind_secondmate_home_record "$HOME_DIR" home-mate "$CASE_DIR/parent" \
+    account_codex=primary "codex_home=$codex_a"
+
+  out=$(FM_FAKE_QUOTA_LOG="$CASE_DIR/quota.log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a record-only secondmate home should still spawn"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_a'" "a record-only secondmate home left its recorded store"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account=primary" "$meta" "the recorded account was not recorded on the task record"
+  [ ! -s "$CASE_DIR/quota.log" ] || fail "a record-only secondmate home probed account quota: $(cat "$CASE_DIR/quota.log")"
+  pass "a secondmate home without its own account file stays on its recorded store"
 }
 
 test_secondmate_home_without_a_record_selects_from_its_own_accounts() {
@@ -3192,6 +3249,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
+test_account_model_substitution_serves_a_missing_model
 test_codex_threads_model_and_effort
 test_codex_threads_catalog_efforts
 test_codex_omits_max_effort_for_unsupported_model
@@ -3255,7 +3313,8 @@ test_claude_spawn_selects_per_dispatch_over_an_ambient_store
 test_explicit_account_pin_is_forwarded_and_recorded
 test_harnesses_without_a_configured_vendor_are_untouched
 test_secondmate_home_crewmate_runs_on_the_home_store_not_the_ambient_one
-test_secondmate_home_stays_on_its_recorded_stores
+test_secondmate_home_with_its_own_accounts_rotates_its_crewmates
+test_secondmate_home_without_its_own_accounts_keeps_the_recorded_store
 test_secondmate_home_without_a_record_selects_from_its_own_accounts
 test_secondmate_home_ignores_a_pin_its_own_config_cannot_resolve
 test_secondmate_home_refuses_a_recorded_store_that_is_gone

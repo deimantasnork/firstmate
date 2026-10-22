@@ -2995,6 +2995,8 @@ SM_CLAUDE_NAME=
 SM_CLAUDE_STORE=
 SM_CLAUDE_PIN=no
 ACCOUNT_EVIDENCE=
+ACCOUNT_PREFER_NAME=
+ACCOUNT_PIN_IGNORED=0
 ACCOUNT_CHOOSER="$SCRIPT_DIR/fm-account-choose.sh"
 SECONDMATE_HOME_MARKER=0
 if [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
@@ -3051,6 +3053,25 @@ account_declared_store() {  # <vendor> <name>
   else
     return 2
   fi
+}
+
+# account_model_substitution <account> <model>
+#   Prints "<model>\t<yes|no>" when THIS home's own config/crew-accounts.json
+#   declares a substitution for <model> on <account>, and nothing otherwise.
+#   A substitution lets an account whose plan lacks a model serve the same
+#   dispatch profile with another model, optionally with Claude Code's
+#   ultracode mode on. The caller applies it to the launch and the record, so
+#   the task names the model it actually ran.
+account_model_substitution() {  # <account> <model>
+  local account=$1 model=$2 config_file
+  config_file="$CONFIG/crew-accounts.json"
+  [ -e "$config_file" ] || return 0
+  jq -r --arg n "$account" --arg m "$model" '
+    [.accounts[]? | select(type == "object" and .name == $n)
+      | (.model_substitutions // {})[$m] // empty]
+    | first // empty
+    | [(.model // ""), (if .ultracode == true then "yes" else "no" end)] | @tsv
+  ' "$config_file" 2>/dev/null || true
 }
 
 # account_pin_resolves_here <vendor> <name>
@@ -3127,16 +3148,18 @@ account_resolved_from() {
   return 0
 }
 
-# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> [<codex-model>]
+# account_resolve <vendor> <pin|-> <recorded-name|-> <recorded-store|-> <allow-auto:0|1> [<codex-model>] [<prefer|->]
 #   Sets ACCOUNT_RESOLVED_NAME, ACCOUNT_RESOLVED_STORE, ACCOUNT_RESOLVED_PIN,
 #   ACCOUNT_RESOLVED_EVIDENCE. A codex model is forwarded to the chooser as
-#   --model, so each store's catalog evidence joins the selection. Returns 1
+#   --model, so each store's catalog evidence joins the selection. A prefer
+#   name is forwarded as --prefer unless a pin applies, so a relaunched task
+#   keeps its account while that account still has headroom. Returns 1
 #   (selecting nothing) when this vendor has no account to select, and refuses
 #   the whole spawn on a configuration error or when no configured account can
 #   be measured as usable. A pin that cannot apply is refused rather than
 #   silently dropped.
 account_resolve() {
-  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 model=${6:-}
+  local vendor=$1 pin=$2 recorded_name=$3 recorded_store=$4 allow_auto=$5 model=${6:-} prefer=${7:-}
   local out rc=0 args
   ACCOUNT_RESOLVED_NAME=
   ACCOUNT_RESOLVED_STORE=
@@ -3154,8 +3177,12 @@ account_resolve() {
     return 0
   fi
   [ -n "$pin" ] || [ "$allow_auto" = 1 ] || return 1
+  [ "$prefer" = - ] && prefer=
   args=(--vendor "$vendor")
   [ -z "$pin" ] || args+=(--pin "$pin")
+  if [ -z "$pin" ] && [ -n "$prefer" ]; then
+    args+=(--prefer "$prefer")
+  fi
   [ -z "$model" ] || args+=(--model "$model")
   out=$("$ACCOUNT_CHOOSER" "${args[@]}" 2>&1) || rc=$?
   if [ "$rc" -eq 3 ]; then
@@ -3314,10 +3341,27 @@ else
         if [ -n "$ACCOUNT_PIN_NAME" ] && ! account_pin_resolves_here "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME"; then
           echo "notice: secondmate home $FM_HOME cannot resolve --account $ACCOUNT_PIN_NAME; using the home's own $ACCOUNT_VENDOR store" >&2
           ACCOUNT_PIN_NAME=
+          ACCOUNT_PIN_IGNORED=1
         fi
         if [ -n "$WORKER_ACCOUNT" ]; then
           # This home's own worker account pin already names the launch store.
           ACCOUNT_ALLOW_AUTO=0
+        elif [ "$ACCOUNT_PIN_IGNORED" -eq 0 ] && [ -z "$ACCOUNT_PIN_NAME" ] \
+          && [ -f "$CONFIG/crew-accounts.json" ] \
+          && [ ! -L "$CONFIG/crew-accounts.json" ]; then
+          # A local secondmate home with its own account file rotates its
+          # crewmates like a primary home, so every subscription is spent. A
+          # relaunch prefers the account its task already recorded, so a live
+          # task does not drift between stores; only a drained one moves.
+          ACCOUNT_PREFER_NAME=
+          if [ -n "$RELAUNCH_META" ] && [ -e "$RELAUNCH_META" ] \
+            && [ "$(fm_meta_get "$RELAUNCH_META" account_pin)" != yes ]; then
+            ACCOUNT_RELAUNCH_NAME=$(fm_meta_get "$RELAUNCH_META" account)
+            if [ -n "$ACCOUNT_RELAUNCH_NAME" ] \
+              && account_declared_store "$ACCOUNT_VENDOR" "$ACCOUNT_RELAUNCH_NAME" >/dev/null 2>&1; then
+              ACCOUNT_PREFER_NAME=$ACCOUNT_RELAUNCH_NAME
+            fi
+          fi
         elif [ -z "$ACCOUNT_PIN_NAME" ] && account_home_identity "$ACCOUNT_VENDOR"; then
           if [ ! -d "$ACCOUNT_HOME_STORE" ]; then
             echo "error: secondmate home $FM_HOME is recorded on the $ACCOUNT_VENDOR store $ACCOUNT_HOME_STORE, which is not an existing directory; restore it or pin one explicitly with --account <name>" >&2
@@ -3331,7 +3375,7 @@ else
       if [ "$ACCOUNT_VENDOR" = codex ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
         ACCOUNT_MODEL=$MODEL
       fi
-      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" "$ACCOUNT_HOME_RECORDED_NAME" "$ACCOUNT_HOME_RECORDED_STORE" "$ACCOUNT_ALLOW_AUTO" "$ACCOUNT_MODEL"; then
+      if account_resolve "$ACCOUNT_VENDOR" "$ACCOUNT_PIN_NAME" "$ACCOUNT_HOME_RECORDED_NAME" "$ACCOUNT_HOME_RECORDED_STORE" "$ACCOUNT_ALLOW_AUTO" "$ACCOUNT_MODEL" "${ACCOUNT_PREFER_NAME:--}"; then
         ACCOUNT_NAME=$ACCOUNT_RESOLVED_NAME
         ACCOUNT_STORE=$ACCOUNT_RESOLVED_STORE
         ACCOUNT_PIN=$ACCOUNT_RESOLVED_PIN
@@ -3343,6 +3387,23 @@ else
         ACCOUNT_HOME_DEFAULT=1
         echo "notice: secondmate home $FM_HOME has no recorded or configured $ACCOUNT_VENDOR store; task $ID runs on the CLI's default store, not the ambient one" >&2
       fi
+    fi
+  fi
+fi
+
+# An account whose plan lacks the dispatched model can still serve the profile
+# through its declared substitution. The launch and the task record then name
+# the model that actually ran.
+CLAUDE_ULTRACODE=0
+if [ "${ACCOUNT_VENDOR:-}" = claude ] && [ -n "${ACCOUNT_NAME:-}" ] && [ -n "$MODEL" ]; then
+  ACCOUNT_SUBSTITUTION=$(account_model_substitution "$ACCOUNT_NAME" "$MODEL")
+  if [ -n "$ACCOUNT_SUBSTITUTION" ]; then
+    ACCOUNT_SUBSTITUTED_MODEL=${ACCOUNT_SUBSTITUTION%%	*}
+    ACCOUNT_SUBSTITUTED_ULTRACODE=${ACCOUNT_SUBSTITUTION#*	}
+    if [ -n "$ACCOUNT_SUBSTITUTED_MODEL" ] && [ "$ACCOUNT_SUBSTITUTED_MODEL" != "$MODEL" ]; then
+      echo "notice: account $ACCOUNT_NAME serves $MODEL as $ACCOUNT_SUBSTITUTED_MODEL${ACCOUNT_SUBSTITUTED_ULTRACODE:+ (ultracode=$ACCOUNT_SUBSTITUTED_ULTRACODE)}" >&2
+      MODEL=$ACCOUNT_SUBSTITUTED_MODEL
+      [ "$ACCOUNT_SUBSTITUTED_ULTRACODE" = yes ] && CLAUDE_ULTRACODE=1
     fi
   fi
 fi
@@ -6507,7 +6568,9 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    claude_ultracode_settings=
+    [ "$CLAUDE_ULTRACODE" = 1 ] && claude_ultracode_settings=',"ultracode":true'
+    claude_settings="'{\"feedbackDrafts\":\"off\"${claude_ultracode_settings}__CLAUDEATTRIBUTION__}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;

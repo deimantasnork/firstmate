@@ -137,8 +137,29 @@ write_default_config() {
 JSON
 }
 
+write_rotating_config() {
+  cat > "$CONFIG" <<JSON
+{
+  "rotation": "round-robin",
+  "accounts": [
+    {
+      "name": "primary",
+      "codex_home": "$STORE_A",
+      "claude_config_dir": "$STORE_A"
+    },
+    {
+      "name": "secondary",
+      "codex_home": "$STORE_B",
+      "claude_config_dir": "$STORE_B"
+    }
+  ]
+}
+JSON
+}
+
 choose() {  # <args...>
-  FM_CONFIG_OVERRIDE="$FIXTURE/config" FM_FAKE_QUOTA_LOG="$QUOTA_LOG" \
+  FM_CONFIG_OVERRIDE="$FIXTURE/config" FM_ACCOUNT_ROTATION_STATE="$FIXTURE/rotation" \
+    FM_FAKE_QUOTA_LOG="$QUOTA_LOG" \
     HOME="$FIXTURE/home" PATH="$FAKEBIN:$PATH" "$CHOOSER" "$@" 2>&1
 }
 
@@ -783,14 +804,14 @@ test_malformed_config_is_refused() {
   out=$(choose --vendor codex)
   status=$?
   expect_code 1 "$status" "a removed top-level order key must be refused"$'\n'"$out"
-  assert_contains "$out" "top-level keys must be accounts only" "the removed order key was silently accepted: $out"
+  assert_contains "$out" "top-level keys must be accounts and rotation only" "the removed order key was silently accepted: $out"
   assert_contains "$out" "order" "the refusal did not name the offending key: $out"
 
   printf '%s\n' '{"accounts":[{"name":"a","codex_home":"/tmp"}],"notes":"legacy"}' > "$CONFIG"
   out=$(choose --vendor codex)
   status=$?
   expect_code 1 "$status" "an unknown top-level key must be refused"$'\n'"$out"
-  assert_contains "$out" "top-level keys must be accounts only" "an unknown top-level key was silently accepted: $out"
+  assert_contains "$out" "top-level keys must be accounts and rotation only" "an unknown top-level key was silently accepted: $out"
 
   printf '%s\n' 'not json' > "$CONFIG"
   out=$(choose --vendor codex)
@@ -798,6 +819,178 @@ test_malformed_config_is_refused() {
   expect_code 1 "$status" "malformed JSON must be refused"$'\n'"$out"
   assert_contains "$out" "is malformed JSON" "the malformed-JSON error was not reported: $out"
   pass "malformed account configuration is reported rather than selected around"
+}
+
+test_round_robin_alternates_across_dispatches() {
+  local out status
+  setup_case round-robin
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_rotating_config
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "the first rotating dispatch should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the first rotating dispatch did not start at the first account: $out"
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "the second rotating dispatch should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the second rotating dispatch did not move to the second account: $out"
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "the third rotating dispatch should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the third rotating dispatch did not return to the first account: $out"
+  pass "round-robin alternates the starting account across dispatches"
+}
+
+test_round_robin_keeps_one_position_per_vendor() {
+  local out status
+  setup_case round-robin-vendors
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_rotating_config
+
+  out=$(choose --vendor codex)
+  [ "$(field "$out" selected)" = primary ] || fail "the codex position did not start first: $out"
+  out=$(choose --vendor claude)
+  [ "$(field "$out" selected)" = primary ] || fail "a codex dispatch moved the claude position: $out"
+  out=$(choose --vendor codex)
+  [ "$(field "$out" selected)" = secondary ] || fail "the codex position did not advance on its own counter: $out"
+  pass "each vendor keeps its own round-robin position"
+}
+
+test_round_robin_does_not_advance_when_nothing_is_selected() {
+  local out status
+  setup_case round-robin-refusal
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 0 exhausted_now secondary@example.com all_models)"
+  write_rotating_config
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 3 "$status" "a fully drained rotation must refuse"$'\n'"$out"
+  [ ! -e "$FIXTURE/rotation/.account-rotation-codex" ] || fail "a refused dispatch advanced the rotation position"
+
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "a healed rotation should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "the refusal consumed a rotation turn: $out"
+  pass "a refused dispatch leaves the round-robin position where it was"
+}
+
+test_round_robin_skips_a_disqualified_account_and_advances() {
+  local out status
+  setup_case round-robin-skip
+  write_store "$STORE_A" "$(quota_json codex 0 exhausted_now primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_rotating_config
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "the healthy second account should be selected"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "a disqualified start account blocked selection: $out"
+  assert_contains "$out" "skipped:runway exhausted_now" "the skip evidence was not reported: $out"
+
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  out=$(choose --vendor codex)
+  [ "$(field "$out" selected)" = secondary ] || fail "the position did not advance past the selected account: $out"
+  pass "round-robin skips a disqualified account and still advances one turn"
+}
+
+test_prefer_keeps_its_place_and_never_rotates() {
+  local out status
+  setup_case round-robin-prefer
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_rotating_config
+
+  out=$(choose --vendor codex --prefer secondary)
+  status=$?
+  expect_code 0 "$status" "a preferred account should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = secondary ] || fail "the preferred account did not keep its place: $out"
+  out=$(choose --vendor codex --prefer secondary)
+  [ "$(field "$out" selected)" = secondary ] || fail "rotation overrode the preferred account: $out"
+  [ ! -e "$FIXTURE/rotation/.account-rotation-codex" ] || fail "a preferred selection advanced the rotation position"
+  pass "a preferred account keeps its fixed place and never rotates"
+}
+
+test_fill_first_ignores_the_rotation_position() {
+  local out status
+  setup_case fill-first-counter
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_default_config
+  mkdir -p "$FIXTURE/rotation"
+  printf '%s\n' 1 > "$FIXTURE/rotation/.account-rotation-codex"
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 0 "$status" "fill-first should select"$'\n'"$out"
+  [ "$(field "$out" selected)" = primary ] || fail "fill-first read the rotation position: $out"
+  [ "$(cat "$FIXTURE/rotation/.account-rotation-codex")" = 1 ] || fail "fill-first advanced the rotation position"
+  pass "the default fill-first mode ignores the rotation position"
+}
+
+test_invalid_rotation_value_is_refused() {
+  local out status
+  setup_case rotation-invalid
+  write_store "$STORE_A" "$(quota_json codex 100 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json codex 90 through_reset secondary@example.com all_models)"
+  write_default_config
+  sed_del='s/^{$/{\n  "rotation": "sequential",/'
+  sed -i "$sed_del" "$CONFIG"
+
+  out=$(choose --vendor codex)
+  status=$?
+  expect_code 1 "$status" "an unknown rotation mode must be refused"$'\n'"$out"
+  assert_contains "$out" "rotation must be fill-first or round-robin" "the rotation error was not reported: $out"
+
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "--validate must refuse an unknown rotation mode"$'\n'"$out"
+  pass "an unknown rotation mode is refused by selection and by --validate"
+}
+
+test_model_substitutions_are_validated() {
+  local out status
+  setup_case substitutions
+  write_store "$STORE_A" "$(quota_json claude 50 through_reset primary@example.com all_models)"
+  write_store "$STORE_B" "$(quota_json claude 50 through_reset secondary@example.com all_models)"
+  cat > "$CONFIG" <<JSON
+{
+  "accounts": [
+    { "name": "primary", "claude_config_dir": "$STORE_A" },
+    { "name": "secondary", "claude_config_dir": "$STORE_B",
+      "model_substitutions": { "claude-fable-5-1": { "model": "claude-opus-5-5", "ultracode": true } } }
+  ]
+}
+JSON
+
+  out=$(choose --validate)
+  status=$?
+  expect_code 0 "$status" "a declared model substitution must validate"$'\n'"$out"
+  [ -z "$out" ] || fail "a valid model substitution produced output: $out"
+
+  printf '%s\n' '{"accounts":[{"name":"a","claude_config_dir":"'"$STORE_A"'","model_substitutions":true}]}' > "$CONFIG"
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "a non-object model_substitutions must be refused"$'\n'"$out"
+  assert_contains "$out" "model_substitutions" "the substitution shape error was not reported: $out"
+
+  printf '%s\n' '{"accounts":[{"name":"a","claude_config_dir":"'"$STORE_A"'","model_substitutions":{"claude-fable-5-1":{"model":""}}}]}' > "$CONFIG"
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "an empty substitution model must be refused"$'\n'"$out"
+
+  printf '%s\n' '{"accounts":[{"name":"a","claude_config_dir":"'"$STORE_A"'","model_substitutions":{"claude-fable-5-1":{"model":"claude-opus-5-5","ultracode":"yes"}}}]}' > "$CONFIG"
+  out=$(choose --validate)
+  status=$?
+  expect_code 1 "$status" "a non-boolean ultracode must be refused"$'\n'"$out"
+  pass "model substitutions are validated and a bad shape is refused"
 }
 
 test_validate_checks_the_whole_file() {
@@ -1122,5 +1315,15 @@ test_every_store_lacking_the_model_refuses
 test_pin_bypasses_the_model_catalog
 test_model_usage_errors
 test_usage_errors
+
+test_round_robin_alternates_across_dispatches
+test_round_robin_keeps_one_position_per_vendor
+test_round_robin_does_not_advance_when_nothing_is_selected
+test_round_robin_skips_a_disqualified_account_and_advances
+test_prefer_keeps_its_place_and_never_rotates
+test_fill_first_ignores_the_rotation_position
+test_invalid_rotation_value_is_refused
+
+test_model_substitutions_are_validated
 
 printf '%s\n' '# all fm-account-choose tests passed'

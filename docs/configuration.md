@@ -1423,6 +1423,7 @@ The file holds absolute or `~/`-relative store paths, so it is host-local and is
 
 ```json
 {
+  "rotation": "round-robin",
   "accounts": [
     {
       "name": "primary",
@@ -1433,20 +1434,35 @@ The file holds absolute or `~/`-relative store paths, so it is host-local and is
       "name": "secondary",
       "codex_home": "/home/me/.codex-secondary",
       "claude_config_dir": "/home/me/.claude-secondary",
-      "reserve": { "claude": 20 }
+      "reserve": { "claude": 20 },
+      "model_substitutions": {
+        "claude-fable-5-1": { "model": "claude-opus-5-5", "ultracode": true }
+      }
     }
   ]
 }
 ```
 
-`accounts` is required and non-empty, and it is the only accepted top-level key; a leftover top-level `reserve` or `order` from an earlier schema is a configuration error rather than a silently ignored setting.
+`accounts` is required and non-empty. `rotation` is the only other accepted top-level key; a leftover top-level `reserve` or `order` from an earlier schema is a configuration error rather than a silently ignored setting.
 Each entry needs a unique `name` matching `^[a-z0-9][a-z0-9._-]*$`, one or both of `codex_home` and `claude_config_dir`, and may carry an optional per-vendor `reserve`.
 A store path is absolute or starts with `~/`, carries no control character, and must be an existing directory when it is used; a violation is a configuration error, reported at session start and refused at spawn rather than selected around.
 `reserve` maps `codex` and/or `claude` to a percentage from 0 through 100, and that account is not chosen automatically for that vendor while its own measured effective remaining percent is at or below that reserve; a reserve of 100 closes the account to automatic selection for that vendor outright, measurable or not.
+`model_substitutions` is optional and maps a dispatched model name to `{ "model": "<effective model>", "ultracode": <true|false> }`.
+It lets an account whose plan lacks a model serve the same dispatch profile with another model instead of failing or being skipped.
+`fm-spawn.sh` applies it after the account is chosen, records the effective model in `model=` on the task record, and, when `ultracode` is true, adds `"ultracode":true` to that worker's Claude settings.
+It applies only to Claude launches and only when the dispatched model matches a declared key.
 Each vendor evaluates the accounts in declaration order, skipping any account that declares no store for that vendor, so adding an account never silently excludes it.
 An absent file means every spawn keeps today's single-store behavior.
 
-Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single owner:
+`rotation` is `"fill-first"` (the default) or `"round-robin"`.
+Fill-first drains the first eligible account toward its reserve before the next one is touched.
+Round-robin starts each dispatch at the next account in declaration order, so consecutive dispatches of one vendor spend different subscriptions rather than draining one.
+The position persists in `state/.account-rotation-<vendor>` and advances only when a dispatch selects an account, so a refused dispatch retries the same start.
+Each vendor keeps its own position, because a codex dispatch must not consume a claude turn.
+Eligibility is unchanged, and the search continues in declaration order from the start position.
+A `--prefer` account keeps its fixed first place and never rotates.
+
+Selection follows `rotation`, and `bin/fm-account-choose.sh` is its single owner:
 
 - The candidates are that vendor's accounts in order, and each is measured by one `quota-axi --provider <vendor> --profile-only --json` read with that account's own store in `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the evidence is per account rather than ambient and nothing is refreshed or written.
 - An account closed by a reserve of 100 is passed over before any catalog or quota read, and its candidate line says the reserve closed it.
@@ -1454,6 +1470,7 @@ Selection is fill-first per vendor, and `bin/fm-account-choose.sh` is its single
 - Unmeasurable headroom - a store `quota-axi` cannot read, including an expired access token that only a real vendor call would refresh - is disclosed uncertainty and never a block, so such an account whose reserve is below 100 stays selectable and is reported as `measured=no`.
 - A Codex dispatch that names a model reads each candidate store's own installed catalog before its quota, so a store that cannot serve the model is passed over without a quota read; an absent, unreadable, malformed, or empty catalog is disclosed uncertainty and never a block, and `bin/fm-codex-models-lib.sh` owns catalog discovery.
 - The first account that is neither closed nor measurably disqualified is chosen, so an earlier account is drained down toward its reserve before the next one is touched.
+- Under `round-robin` the same walk starts at the persisted position for that vendor instead of the first account, wraps once through the declaration order, and writes the next position only after a selection, so alternating dispatches use every subscription the accounts file declares.
 - When every account for that vendor is closed or measurably disqualified the spawn refuses and prints the candidate evidence; an explicit pin still selects one.
 
 `fm-spawn.sh` forwards the chosen store onto that launch as `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, so the choice is per dispatch rather than ambient, and records it on the task record as `account=`.
@@ -1461,15 +1478,15 @@ In a primary home a pre-set store is forwarded only when that home has no accoun
 A secondmate home never forwards an ambient store, as described below.
 
 `--account <name>` pins one account for that task.
-A pin is an explicit decision, so it bypasses the fill-first order, the reserve including a closed one, the exhaustion check, and the model catalog check, and its own evidence is still reported.
+A pin is an explicit decision, so it bypasses the rotation order and the fill-first order, the reserve including a closed one, the exhaustion check, and the model catalog check, and its own evidence is still reported.
 An explicit pin is recorded as `account_pin=yes` and is reused on every relaunch of that task, while an automatically chosen account is re-selected for a new attempt.
 A secondmate home holds one store per vendor: it resolves those stores when it is created, records them as `account_codex`, `codex_home`, `account_claude`, and `claude_config_dir` on its secondmate record in the parent home, and ships them into its own environment, so its identity cannot drift between stores mid-flight.
 Every relaunch and recovery respawn of that home reuses its recorded stores unmeasured while the home has work in flight, meaning any task record in its own `state/`, the same in-flight test teardown applies.
-An idle home's relaunch or recovery respawn is the safe boundary: each vendor's recorded account is measured first under the fill-first rules above and kept while it is neither closed nor measurably disqualified, and only a drained one is replaced by the account fill-first selection picks, leaving the other vendor's store where it is.
+An idle home's relaunch or recovery respawn is the safe boundary: each vendor's recorded account is measured first under the selection rules above and kept while it is neither closed nor measurably disqualified, and only a drained one is replaced by the account selection picks, leaving the other vendor's store where it is.
 A recorded store that the launching home's `config/crew-accounts.json` does not declare under its recorded account name, or a vendor whose every account is drained, keeps the recorded store with a one-line notice.
-A crewmate that home spawns runs on the same recorded store, read from that record through the home's local parent binding rather than from the environment, because an agent's shell can re-source a profile that points the ambient store at another account; the home does not auto-select while its record names a store, and a recorded store that is no longer an existing directory refuses the spawn.
+A crewmate that home spawns selects from the home's own `config/crew-accounts.json` when that file exists, so a local home rotates its crewmates across every subscription like a primary home. A relaunch of an existing task prefers the account that task already recorded and moves only when that account is measurably disqualified, so a live task does not drift between stores. A home without its own account file, such as a remote route, runs its crewmates on the recorded store, read from that record through the home's local parent binding rather than from the environment, because an agent's shell can re-source a profile that points the ambient store at another account; such a home does not auto-select while its record names a store, and a recorded store that is no longer an existing directory refuses the spawn.
 Where the home has no reachable record naming a store for that vendor, such as on a remote route, it selects from its own `config/crew-accounts.json` like a primary home, and with neither it launches that crewmate on the CLI's own default store with a one-line notice instead of forwarding the ambient value.
-Only an explicit `--account` moves one worker off the home's store.
+An explicit `--account` still wins over both the rotation and the recorded store.
 An `--account` in a secondmate home is honored only when that home's own `config/crew-accounts.json` declares the account with an existing store directory for the vendor; a pin the home cannot resolve is ignored with a one-line notice and the home's own store wins, so a pinned home is never refused because its account file cannot resolve someone else's pin.
 On a secondmate spawn that pin applies to each vendor the named account declares a store for, is recorded as `account_codex_pin=yes` or `account_claude_pin=yes`, and is never re-resolved; the other vendor resolves exactly as it would without the pin, and an `--account` that names no store for any vendor is refused.
 A primary cannot pass `--account` through a remote-secondmate spawn because its account file names paths on the primary host; the remote home resolves its stores from its own host-local configuration.
