@@ -970,46 +970,6 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
-# An old captured answer belongs to the hold it closed, even when the same
-# task is held again. A retry of the new answer after its release remains safe.
-test_keyed_answer_replay_stays_with_its_hold() {
-  local home id out show before after
-  home=$(make_home keyed-answer-hold-replay)
-  id=sample-reused-call
-  tasks_in "$home" add "$id" "Work with two captain gates" --kind ship --repo sample >/dev/null \
-    || fail "could not create the reused-call fixture"
-  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold "$id" --reason "first gate" >/dev/null \
-    || fail "could not raise hold A"
-  out=$(printf '%s\t%s\t%s\trelease\n' "$id" old-answer "First answer" \
-    | run_captain "$home" answers --source "deck capture one") \
-    || fail "could not answer hold A: $out"
-  assert_contains "$out" "closed: $id" "hold A's answer did not release it"
-  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold "$id" --reason "second gate" >/dev/null \
-    || fail "could not raise hold B"
-  before=$(tasks_in "$home" show "$id" --full)
-  if out=$(printf '%s\t%s\t%s\trelease\n' "$id" old-answer "First answer" \
-    | run_captain "$home" answers --source "deck capture one"); then
-    fail "replaying hold A's answer reported a release of hold B: $out"
-  fi
-  assert_contains "$out" "skipped: $id" "the stale answer was not identified as skipped"
-  show=$(tasks_in "$home" show "$id" --full)
-  assert_contains "$show" "held: yes" "hold A's replay released hold B"
-  [ "$show" = "$before" ] || fail "hold A's replay changed hold B's durable record"
-
-  out=$(printf '%s\t%s\t%s\trelease\n' "$id" new-answer "Second answer" \
-    | run_captain "$home" answers --source "deck capture two") \
-    || fail "could not answer hold B: $out"
-  assert_contains "$out" "closed: $id" "hold B's answer did not release it"
-  before=$(tasks_in "$home" show "$id" --full)
-  out=$(printf '%s\t%s\t%s\trelease\n' "$id" new-answer "Second answer" \
-    | run_captain "$home" answers --source "deck capture two") \
-    || fail "the duplicate answer for hold B was not idempotent: $out"
-  assert_contains "$out" "closed: $id" "the duplicate answer for hold B was not accepted"
-  after=$(tasks_in "$home" show "$id" --full)
-  [ "$after" = "$before" ] || fail "the duplicate answer for hold B changed its durable record"
-  pass "keyed answer replay cannot release a later hold and a current duplicate is idempotent"
-}
-
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -1512,295 +1472,6 @@ EOF
   [ ! -e "$parent/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
   assert_no_grep 'captain-hold-main-call' "$channel" "a main home's hold leaked onto a mate channel"
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
-}
-
-# A stub tmux whose panes read as idle and empty, so a doorbell always submits,
-# and which records every literal line typed into a pane in
-# <fakebin>/doorbell.log. <fakebin>/doorbell.window names the one window it
-# reports, so fm-send resolves the lane's recorded endpoint.
-install_doorbell_tmux() {  # <fakebin> <window-name>
-  local fakebin=$1
-  printf '%s\n' "$2" > "$fakebin/doorbell.window"
-  : > "$fakebin/doorbell.log"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-here=$(cd "$(dirname "$0")" && pwd)
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    [ "$literal" = 0 ] || printf '%s\n' "${1:-}" >> "$here/doorbell.log"
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) cat "$here/doorbell.window"; exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" sleep
-}
-
-# A secondmate home <mate-id> bound to <parent> by <route>, with a doorbell
-# tmux. The caller records the lane endpoint the route keeps.
-make_mate_home() {  # <name> <mate-id> <parent-or-empty> <local|remote>
-  local mate="$TMP_ROOT/$1" fakebin
-  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
-  fm_test_tasks_toml "$mate/.tasks.toml"
-  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
-  printf '%s\n' "$2" > "$mate/.fm-secondmate-home"
-  if [ "$4" = local ]; then
-    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$3" \
-      > "$mate/.fm-secondmate-parent"
-  else
-    printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$mate/.fm-secondmate-parent"
-  fi
-  cat > "$mate/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-EOF
-  fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
-  install_doorbell_tmux "$fakebin" "fm-$2"
-  printf '%s\n' "$mate"
-}
-
-hold_with_release_card() {  # <home> <task-id>
-  tasks_in "$1" add "$2" "Ship $2" --kind ship --repo sample >/dev/null \
-    || fail "could not create $2"
-  run_captain "$1" hold "$2" --reason "captain go needed for $2" \
-    --card-title "Go for $2" --option "go:Go" --option "wait:Wait" --close release >/dev/null \
-    || fail "could not raise the card for $2"
-  assert_present "$1/state/decision-cards/$2.json" "hold did not write the card for $2"
-}
-
-# How the parent's own fold reads one key, through the classifier it uses.
-channel_key_verb() {  # <status-file> <key>
-  bash -c '. "$1"; status_key_closing_verb "$2" "$3"' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2"
-}
-
-lane_records() {  # <inbox-dir>
-  find "$1" -name '*.msg' -type f 2>/dev/null | wc -l | tr -d ' '
-}
-
-# One deck answer in a main home takes effect at once: the card leaves the
-# store the deck reads live and the home's own session is woken through its
-# captain inbox, while an unrelated open hold keeps its card and its hold. A
-# replay of either intake path changes nothing, including after the session
-# acknowledged the wake.
-test_deck_answer_retires_the_card_and_wakes_a_main_home() {
-  local home a b c out queue note
-  home=$(make_home deck-answer-main)
-  a=sample-deck-release
-  b=sample-deck-unrelated
-  c=sample-direct-release
-  hold_with_release_card "$home" "$a"
-  hold_with_release_card "$home" "$b"
-  hold_with_release_card "$home" "$c"
-
-  out=$(printf '%s\tgo\tGo\trelease\n' "$a" \
-    | run_captain "$home" answers --source "deck fixture" 2>&1) \
-    || fail "the deck answer was refused: $out"
-  assert_contains "$out" "closed: $a" "the deck answer did not release $a"
-  assert_contains "$(tasks_in "$home" show "$a" --full)" "held: no" "the deck answer kept the hold"
-  assert_absent "$home/state/decision-cards/$a.json" "the answered call kept its card in the deck's store"
-  [ "$(grep -lF "held call $a (released)" "$home/state/inbox"/*.note | wc -l | tr -d ' ')" = 1 ] \
-    || fail "the deck answer did not leave exactly one captain-inbox wake for $a"
-  [ "$(grep -cF "Captain answer recorded for held call $a (released)" "$home/state/.wake-queue")" = 1 ] \
-    || fail "the deck answer did not queue exactly one wake for $a: $(cat "$home/state/.wake-queue")"
-  note=$(grep -lF "held call $a (released)" "$home/state/inbox"/*.note)
-  assert_grep "Answer: go" "$note" "the wake did not carry the recorded answer"
-  assert_present "$home/state/decision-cards/$b.json" "an unrelated answer retired an open call's card"
-  assert_contains "$(tasks_in "$home" show "$b" --full)" "held: yes" "an unrelated answer released an open hold"
-  ! grep -qF "$b" "$home/state/inbox"/*.note || fail "an unrelated answer woke the home about $b"
-
-  queue=$(cat "$home/state/.wake-queue")
-  out=$(printf '%s\tgo\tGo\trelease\n' "$a" \
-    | run_captain "$home" answers --source "deck fixture" 2>&1) \
-    || fail "the deck answer replay was refused: $out"
-  assert_contains "$out" "closed: $a" "the deck answer replay was not idempotent"
-  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "a replayed deck answer woke the home again"
-  [ "$(find "$home/state/inbox" -name '*.note' | wc -l | tr -d ' ')" = 1 ] \
-    || fail "a replayed deck answer left a second inbox note"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-inbox.sh" drain \
-    --ack "$(basename "$note" .note)" >/dev/null || fail "could not acknowledge the wake"
-  printf '%s\tgo\tGo\trelease\n' "$a" \
-    | run_captain "$home" answers --source "deck fixture" >/dev/null 2>&1 \
-    || fail "the replay after acknowledgement was refused"
-  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "a replay after acknowledgement woke the home again"
-  [ "$(find "$home/state/inbox" -name '*.note' | wc -l | tr -d ' ')" = 1 ] \
-    || fail "a replay after acknowledgement left a new inbox note"
-
-  printf 'Go now.\n' > "$home/go.txt"
-  run_captain "$home" answer "$c" --decision-file "$home/go.txt" --release >/dev/null \
-    || fail "answer --release failed"
-  assert_absent "$home/state/decision-cards/$c.json" "answer --release kept the card"
-  [ "$(grep -cF "Captain answer recorded for held call $c (released)" "$home/state/.wake-queue")" = 1 ] \
-    || fail "answer --release did not wake the home exactly once"
-  queue=$(cat "$home/state/.wake-queue")
-  run_captain "$home" answer "$c" --decision-file "$home/go.txt" --release >/dev/null \
-    || fail "the answer --release retry was not idempotent"
-  [ "$(cat "$home/state/.wake-queue")" = "$queue" ] || fail "an answer --release retry woke the home again"
-  assert_present "$home/state/decision-cards/$b.json" "the unrelated open call lost its card"
-  pass "a deck answer retires its card and wakes a main home once; replays and other holds stay untouched"
-}
-
-# The session that holds a home's lock is the one a wake would reach, so when
-# it records the answer itself nothing is queued for it. The lock is attributed
-# to this process's own harness ancestry, which exists only when a verified
-# harness runs the suite.
-test_answer_from_the_owning_session_wakes_nobody() {
-  local home id pids lock_pid
-  pids=$(bash -c '. "$1"; fm_harness_ancestry_pids' _ "$ROOT/bin/fm-session-lock-lib.sh" 2>/dev/null || true)
-  lock_pid=$(printf '%s\n' "$pids" | sed '/^$/d' | tail -n 1)
-  if [ -z "$lock_pid" ]; then
-    pass "skipped: no verified harness in this run's ancestry to hold the fixture's session lock"
-    return 0
-  fi
-  home=$(make_home answer-owning-session)
-  id=sample-session-answer
-  hold_with_release_card "$home" "$id"
-  printf '%s\n' "$lock_pid" > "$home/state/.lock"
-  printf 'Go.\n' > "$home/go.txt"
-  run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
-    || fail "the owning session's answer failed"
-  assert_absent "$home/state/decision-cards/$id.json" "the owning session's answer kept the card"
-  [ ! -e "$home/state/inbox" ] || [ -z "$(find "$home/state/inbox" -name '*.note')" ] \
-    || fail "the owning session's own answer queued a wake for itself"
-  pass "an answer recorded by the session holding the home's lock wakes nobody"
-}
-
-# The relayed secondmate case: a deck answer recorded in the mate's own home
-# publishes its resolved line on the parent channel, retires the mate's card,
-# and wakes the mate itself through the steering lane its parent steers it
-# through, with one doorbell. Replays publish, retire, and ring nothing - also
-# after the mate acknowledged the wake - and the mate's other open hold keeps
-# its card and its open parent decision.
-test_secondmate_deck_answer_publishes_retires_and_wakes_its_home() {
-  local parent mate id other channel lane out rec
-  parent=$(make_home deck-answer-parent)
-  mate=$(make_mate_home deck-answer-mate deck-mate "$parent" local)
-  fm_write_secondmate_meta "$parent/state/deck-mate.meta" "$mate" "sess:fm-deck-mate" sample claude
-  channel="$parent/state/deck-mate.status"
-  lane="$parent/state/deck-mate.inbox"
-  id=sample-renumber
-  other=sample-other-call
-  hold_with_release_card "$mate" "$id"
-  hold_with_release_card "$mate" "$other"
-  assert_grep "needs-decision [key=captain-hold-$id-1]" "$channel" "the mate's hold did not reach its parent"
-
-  out=$(printf '%s\trenumber\tRenumber\trelease\n' "$id" \
-    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" 2>&1) \
-    || fail "the relayed deck answer was refused: $out"
-  assert_contains "$out" "closed: $id" "the relayed deck answer did not release the hold"
-  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 1 ] \
-    || fail "the answer did not publish exactly one resolved line: $(cat "$channel")"
-  assert_absent "$mate/state/decision-cards/$id.json" "the answered call kept its card in the mate's store"
-  rec="$lane/001.msg"
-  assert_present "$rec" "the answer did not wake the mate through its steering lane"
-  assert_grep "delivery=fire-and-forget" "$rec" "the lane wake is not a fire-and-forget record"
-  assert_grep "held call $id (released)" "$rec" "the lane wake does not name the released call"
-  assert_grep "Answer: renumber" "$rec" "the lane wake does not carry the recorded answer"
-  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
-    || fail "the lane wake did not ring the mate exactly once: $(cat "$mate/fakebin/doorbell.log")"
-  assert_present "$mate/state/decision-cards/$other.json" "the unrelated open call lost its card"
-  assert_no_grep "resolved [key=captain-hold-$other-" "$channel" "the unrelated open call was resolved"
-  assert_no_grep "$other" "$rec" "the lane wake named the unrelated open call"
-
-  out=$(printf '%s\trenumber\tRenumber\trelease\n' "$id" \
-    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" 2>&1) \
-    || fail "the relayed deck answer replay was refused: $out"
-  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 1 ] \
-    || fail "a replay published a second resolved line: $(cat "$channel")"
-  [ "$(lane_records "$lane")" = 1 ] || fail "a replay woke the mate a second time"
-  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] || fail "a replay rang the mate again"
-  mv "$rec" "$lane/handled/"
-  printf '%s\trenumber\tRenumber\trelease\n' "$id" \
-    | run_captain "$mate" answers --source "herdr-firstmate-flow captain's deck" >/dev/null 2>&1 \
-    || fail "the replay after acknowledgement was refused"
-  [ "$(lane_records "$lane")" = 1 ] || fail "a replay after acknowledgement woke the mate again"
-  [ "$(grep -cF "deck-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
-    || fail "a replay after acknowledgement rang the mate again"
-  assert_present "$mate/state/decision-cards/$other.json" "a replay retired the unrelated card"
-  pass "a relayed deck answer publishes once, retires the card, and wakes the owning mate once"
-}
-
-# A re-held call whose earlier answer was rewritten out of its task body
-# reuses its parent key, so the new episode's lines repeat an earlier
-# episode's text; the parent channel must still see the call open and then
-# closed. This is the 2026-10-09 letspadel-ui-keyed-analytics-id gap, where the
-# second "released" line read as a retry of the first and the parent kept a
-# call the captain had already answered.
-test_reheld_call_with_a_rewritten_body_still_closes_its_parent_decision() {
-  local parent mate id channel out answer
-  parent=$(make_home rehold-parent)
-  mate=$(make_mate_home rehold-mate rehold-mate "$parent" local)
-  fm_write_secondmate_meta "$parent/state/rehold-mate.meta" "$mate" "sess:fm-rehold-mate" sample claude
-  channel="$parent/state/rehold-mate.status"
-  id=sample-reheld-work
-  tasks_in "$mate" add "$id" "Ship the reheld work" --kind ship --repo sample >/dev/null \
-    || fail "could not create the reheld fixture"
-  run_captain "$mate" hold "$id" --reason "captain build choice needed" >/dev/null \
-    || fail "first hold failed"
-  printf '%s\tbuild\t\trelease\n' "$id" | run_captain "$mate" answers --source "deck one" >/dev/null 2>&1 \
-    || fail "first answer failed"
-  printf 'Dispatched work body; earlier answers live in the archived body.\n' > "$mate/body.txt"
-  # Episode two is the incident: a different reason opens the reused key, and
-  # the answer's resolved line repeats episode one's text exactly.
-  # Episode three repeats episode two's reason too, so its opening line
-  # repeats an earlier one as well.
-  for answer in merge ship; do
-    tasks_in "$mate" update "$id" --body-file "$mate/body.txt" >/dev/null \
-      || fail "could not rewrite the body"
-    run_captain "$mate" hold "$id" --reason "captain merge approval needed" >/dev/null \
-      || fail "re-hold failed before the $answer answer"
-    [ "$(channel_key_verb "$channel" "captain-hold-$id-1")" = needs-decision ] \
-      || fail "the re-held call did not reopen its parent decision: $(cat "$channel")"
-    out=$(printf '%s\t%s\t\trelease\n' "$id" "$answer" \
-      | run_captain "$mate" answers --source "deck $answer" 2>&1) \
-      || fail "the $answer answer failed: $out"
-    [ "$(channel_key_verb "$channel" "captain-hold-$id-1")" = resolved ] \
-      || fail "the $answer answer's resolved line was swallowed as a retry: $(cat "$channel")"
-  done
-  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$channel")" = 3 ] \
-    || fail "each episode did not close exactly once: $(cat "$channel")"
-  [ -z "$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")" ] \
-    || fail "the parent still folds an answered call open: $(cat "$channel")"
-  pass "a re-held call with a rewritten body still closes its parent decision"
-}
-
-# A remote secondmate's lane lives host-local in its own state/parent-route,
-# and its parent channel in its own state/parent-replies.status.
-test_remote_secondmate_answer_wakes_its_host_local_lane() {
-  local mate id lane out
-  mate=$(make_mate_home remote-answer-mate remote-mate "" remote)
-  mkdir -p "$mate/state/parent-route"
-  fm_write_secondmate_meta "$mate/state/parent-route/remote-mate.meta" "$mate" \
-    "sess:fm-remote-mate" sample claude
-  lane="$mate/state/parent-route/remote-mate.inbox"
-  id=sample-remote-call
-  hold_with_release_card "$mate" "$id"
-  out=$(printf '%s\tgo\tGo\trelease\n' "$id" | run_captain "$mate" answers --source "deck" 2>&1) \
-    || fail "the remote mate's answer was refused: $out"
-  [ "$(grep -cF "resolved [key=captain-hold-$id-1]" "$mate/state/parent-replies.status")" = 1 ] \
-    || fail "the remote mate's answer did not reach its parent channel"
-  assert_absent "$mate/state/decision-cards/$id.json" "the remote mate kept the answered card"
-  assert_grep "held call $id (released)" "$lane/001.msg" "the remote mate's lane was not woken"
-  [ "$(grep -cF "remote-mate.inbox" "$mate/fakebin/doorbell.log")" = 1 ] \
-    || fail "the remote mate was not rung exactly once"
-  pass "a remote secondmate's answer wakes its host-local lane"
 }
 
 test_secondmate_reconcile_publishes_before_request_retirement() {
@@ -2577,9 +2248,7 @@ test_legacy_identities_keep_working() {
 # board went on presenting as armed. Everything between the captured result and
 # the closed task is asserted here end to end - capture, the wake that tells
 # firstmate to look, and the recorded answer - because each of those was intact
-# on its own while the chain as a whole delivered nothing. That one wake is also
-# the answer's only notification, and the answered call's card still leaves the
-# store.
+# on its own while the chain as a whole delivered nothing.
 test_board_answer_reaches_the_keyed_answer_intake() {
   local home sid stub out queue show
   home=$(make_home board-channel)
@@ -2587,10 +2256,8 @@ test_board_answer_reaches_the_keyed_answer_intake() {
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
 
   run_captain "$home" hold sample-board-call --title "Choose the sample board route" \
-    --reason "captain board route choice pending" --repo sample \
-    --option "north:Take the north route" --option "south:Take the south route" >/dev/null \
+    --reason "captain board route choice pending" --repo sample >/dev/null \
     || fail "could not register the board call"
-  assert_present "$home/state/decision-cards/sample-board-call.json" "the board call has no card"
 
   # One published Lavish poll response carrying the captain's structured answer,
   # in the shape the adapter's own reader parses: a declared field order, an
@@ -2622,21 +2289,13 @@ SH
   queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
   assert_contains "$queue" "check: procevent lavish $sid 1" \
     "the captured board answer produced no wake: $queue"
-  # The capture's own wake already tells this home about the answer, so the
-  # answer adds no captain-inbox wake of its own: one answer, one notification.
-  [ "$(printf '%s\n' "$queue" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
-    || fail "one board answer did not produce exactly one notification: $queue"
-  [ ! -e "$home/state/inbox" ] || [ -z "$(find "$home/state/inbox" -name '*.note')" ] \
-    || fail "the board answer also left a captain-inbox wake: $(cat "$home/state/inbox"/*.note)"
 
   show=$(tasks_in "$home" show sample-board-call --full)
   assert_contains "$show" "state: done" "the board answer did not close the captain call"
   assert_contains "$show" "north" "the board answer lost the captain's selection"
   assert_contains "$show" "the captured result $sid sequence 1" \
     "the recorded answer did not name the board result that carried it"
-  assert_absent "$home/state/decision-cards/sample-board-call.json" \
-    "the board answer kept the answered call's card"
-  pass "a board answer reaches the keyed-answer intake, retires its card, and wakes firstmate once"
+  pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
 # The intake is channel-agnostic, so chat must reach it the same way a captured
@@ -4283,66 +3942,6 @@ SH
 # that accepted window spans two separate lifecycle owners.
 # Queued forge merges are also uncovered because they land asynchronously after
 # the local merge command and its task control lock have returned.
-test_deck_merge_answer_keeps_the_ship_open_until_landing() {
-  local home id pr repo wt store result show out json
-  home=$(make_home deck-merge-release)
-  configure_merged_github "$home"
-  id=sample-deck-merge
-  pr=https://github.com/sample/sample/pull/33
-  repo="$home/projects/sample-deck"
-  wt="$home/projects/$id"
-  fm_git_worktree "$repo" "$wt" "fm/$id"
-  tasks_in "$home" add "$id" "Ship the deck-approved pull request" --kind ship \
-    --repo sample --start >/dev/null || fail "could not create the deck merge fixture"
-  fm_write_meta "$home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
-    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
-    "pr=$pr" "spawn_gen=fixture-$id"
-  printf 'done: merge ready\n' > "$home/state/$id.status"
-  run_captain "$home" hold "$id" --reason "captain merge approval pending" \
-    --card-title "Merge the sample change" --type merge --risk low --pr-url "$pr" \
-    --option "merge:Merge now" --option "wait:Not yet" --recommend merge >/dev/null \
-    || fail "could not raise the deck merge card"
-  store="$home/state/decision-cards/$id.json"
-  result="$home/deck.result"
-  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n' > "$result"
-  # Capture the same answer context a deck sends, including the card's close
-  # mode only when the durable card actually carries one.
-  jq -r '.card as $card
-    | ({schema:"fm-bearings-answer.v1", question:$card.key, selection:"merge", note:""}
-       + (if $card | has("close") then {close:$card.close} else {} end)) as $context
-    | ["1", ("Merge now\n\nContext data:\n" + ($context | tojson)), "form", "choice", "Merge now"]
-    | "  " + (map(tojson) | join(","))' "$store" >> "$result" \
-    || fail "could not capture the deck merge answer"
-  out=$(run_lavish "$home" answers "$result" \
-    | run_captain "$home" answers --source "captured deck merge") \
-    || fail "the deck merge answer was refused: $out"
-  show=$(tasks_in "$home" show "$id" --full) || fail "the deck-approved row disappeared"
-  assert_contains "$show" "state: in_flight" "a deck Merge answer closed the ship before landing"
-  assert_contains "$show" "held: no" "the deck Merge answer did not release the hold"
-  assert_contains "$show" "Resolution mode: released" "the deck answer did not record a release"
-  assert_absent "$home/state/$id.pr-poll-merge-notified" "the deck answer invented a landing record"
-  json=$(run_bearings "$home") || fail "Bearings failed before the merge landed"
-  printf '%s' "$json" | jq -e --arg id "$id" '.landed | all(.id != $id)' >/dev/null \
-    || fail "the deck-approved ship appeared landed before the merge"
-  out=$(run_lavish "$home" answers "$result" \
-    | run_captain "$home" answers --source "captured deck merge") \
-    || fail "replaying the deck merge answer was not idempotent: $out"
-  show=$(tasks_in "$home" show "$id" --full)
-  assert_contains "$show" "state: in_flight" "replaying the deck answer closed the ship"
-
-  run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
-    || fail "the deck-approved merge was refused: $(cat "$home/merge.err")"
-  assert_present "$home/state/$id.pr-poll-merge-notified" "the confirmed merge lacked its landing record"
-  assert_grep "check: merge landed: $id $pr" "$home/state/.wake-queue" \
-    "the confirmed merge did not publish its landing"
-  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
-    || fail "cleanup after the deck-approved landing failed: $(cat "$home/teardown.err")"
-  show=$(tasks_in "$home" show "$id" --full)
-  assert_contains "$show" "state: done" "the landed ship row did not close"
-  pass "a deck Merge answer releases the in-flight ship until a confirmed landing"
-}
-
 test_released_merge_passes_the_entrypoint_and_lands() {
   local home id pr repo wt show json
   home=$(make_home released-merge-entrypoint)
@@ -4555,123 +4154,6 @@ test_retained_body_keeps_its_utf8_bytes() {
     "cleanup warned about a wide character instead of writing raw bytes"
 
   pass "cleanup preserves every byte of a retained body's non-ASCII characters"
-}
-
-test_hold_writes_a_raise_time_decision_card() {
-  local home store mode
-  home=$(make_home raise-time-card)
-  store="$home/state/decision-cards/sample-card-call.json"
-  run_captain "$home" hold sample-card-call --title "Decide the sample route" \
-    --reason "captain route choice" --repo sample --card-title "Pick the sample route" \
-    --about "two viable routes" --option "route-a:Route A:reversible" \
-    --option "route-b:Route B" --recommend route-a --close release \
-    --decide "choose one" >/dev/null \
-    || fail "hold did not accept the card flags"
-  jq -e '.schema == "fm-decision-card.v1"
-         and (.card.key == "sample-card-call")
-         and (.card.title == "Pick the sample route")
-         and (.card.repo == "sample")
-         and (.card.decide == "choose one")
-         and (.card.about == "two viable routes")
-         and ([.card.options[].value] == ["route-a", "route-b"])
-         and (.card.recommend_value == "route-a")
-         and (.card.close == "release")
-         and (any(.card.options[]; .value == "reconcile") | not)' "$store" >/dev/null \
-    || fail "the raise-time card is not a valid authored fm-decision-card.v1 record"
-  mode=$(stat -c %a "$store" 2>/dev/null || stat -f %Lp "$store")
-  [ "$mode" = "600" ] || fail "the raise-time card is not 0600: $mode"
-  pass "hold writes the raise-time decision card into the durable store"
-}
-
-test_authored_merge_cards_enforce_release_mode() {
-  local home store
-  home=$(make_home authored-merge-release)
-  store="$home/state/decision-cards/sample-authored-merge.json"
-  run_captain "$home" hold sample-authored-merge --title "Ship the approved change" \
-    --reason "captain merge approval pending" --repo sample \
-    --card-title "Merge the sample change" --type merge --risk low \
-    --option "merge:Merge now" --close "done" >/dev/null \
-    || fail "could not raise an authored merge card"
-  jq -e '.card.close == "release"' "$store" >/dev/null \
-    || fail "an authored merge card retained a premature completion mode"
-  jq '.card | del(.close)' "$store" > "$home/card.json"
-  run_captain "$home" card sample-authored-merge --card-file "$home/card.json" >/dev/null \
-    || fail "could not rewrite the merge card from a file"
-  jq -e '.card.close == "release"' "$store" >/dev/null \
-    || fail "a file-authored merge card defaulted to completion"
-  pass "flag and file-authored merge cards enforce release mode"
-}
-
-test_hold_refuses_an_invalid_card_before_any_mutation() {
-  local home
-  home=$(make_home card-refusal)
-  if run_captain "$home" hold sample-bad-card --title "Bad card" --reason "captain choice" \
-      --card-title "Bad card" --option "a:Option A" --recommend nowhere \
-      > "$home/out" 2> "$home/err"; then
-    fail "hold accepted a card whose recommendation names no option"
-  fi
-  assert_contains "$(cat "$home/err")" "recommend_value" "the refusal does not name the broken field"
-  assert_absent "$home/state/decision-cards/sample-bad-card.json" "a refused card was still stored"
-  if grep -q "sample-bad-card" "$home/data/backlog.md"; then
-    fail "a refused card still created the task"
-  fi
-  if run_captain "$home" hold sample-reserved-card --title "Reserved" --reason "captain choice" \
-      --card-title "Reserved" --option "reconcile:Reconcile it" > "$home/out" 2> "$home/err"; then
-    fail "hold accepted the reserved reconcile option value"
-  fi
-  assert_contains "$(cat "$home/err")" "reconcile is reserved" \
-    "the refusal does not name the reserved value"
-  pass "hold refuses an invalid card before any mutation"
-}
-
-test_card_rewrites_an_open_call_and_a_rehold_preserves_it() {
-  local home store
-  home=$(make_home card-update)
-  store="$home/state/decision-cards/sample-card-call.json"
-  run_captain "$home" hold sample-card-call --title "Decide the sample route" \
-    --reason "captain route choice" --repo sample --card-title "First copy" \
-    --option "a:Option A" >/dev/null || fail "hold with a card failed"
-  run_captain "$home" card sample-card-call --card-title "Second copy" \
-    --option "a:Option A" --option "b:Option B" >/dev/null \
-    || fail "card did not rewrite an open call"
-  jq -e '.card.title == "Second copy" and ([.card.options[].value] == ["a", "b"])' "$store" >/dev/null \
-    || fail "the rewritten card is not the stored record"
-  run_captain "$home" hold sample-card-call --reason "captain route choice" >/dev/null \
-    || fail "re-holding an active call failed"
-  jq -e '.card.title == "Second copy"' "$store" >/dev/null \
-    || fail "a re-hold without card flags clobbered the stored card"
-  if run_captain "$home" card sample-absent-call --card-title "Absent" --option "a:A" \
-      > "$home/out" 2> "$home/err"; then
-    fail "card accepted a task that is not an open captain call"
-  fi
-  assert_absent "$home/state/decision-cards/sample-absent-call.json" \
-    "a card was written for a task that is not an open call"
-  pass "card rewrites an open call and a re-hold preserves the stored copy"
-}
-
-# A card belongs to a live call: the answer retires it from the store, and
-# `card` then refuses rather than writing one for the closed call.
-test_card_refuses_a_closed_call() {
-  local home store out rc
-  home=$(make_home card-closed)
-  store="$home/state/decision-cards/sample-closed-card.json"
-  run_captain "$home" hold sample-closed-card --title "Decide the closed route" \
-    --reason "captain closed-route choice" --repo sample --card-title "Shown copy" \
-    --option "a:Option A" >/dev/null || fail "hold with a card failed"
-  printf 'Go with A.\n' > "$home/go.txt"
-  run_captain "$home" answer sample-closed-card --decision-file "$home/go.txt" >/dev/null \
-    || fail "answer failed on the card fixture"
-  assert_absent "$store" "the answer left the closed call's card in the store the deck reads"
-  set +e
-  out=$(run_captain "$home" card sample-closed-card --card-title "Late copy" \
-    --option "b:Option B" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "card accepted a call that is no longer open"
-  assert_contains "$out" "not an open captain call" \
-    "the closed-call refusal did not name the reason: $out"
-  assert_absent "$store" "the refused card wrote a record for the closed call"
-  pass "an answer retires the card and card refuses the closed call"
 }
 
 # A refused hold must never read as a recorded one. The gate used to accept the
@@ -5147,7 +4629,138 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
-test_deck_merge_answer_keeps_the_ship_open_until_landing
+# Done retention moves an answered captain call into the Done archive, where
+# tasks-axi no longer shows it; the completion gate must still count the
+# archived answer as durable, and must still refuse an archived close that
+# carries no captain answer or an attested call found nowhere.
+test_archived_answered_hold_still_satisfies_the_gate() {
+  local home id archive
+  home=$(make_home archived-answer)
+  id=sample-archived-review
+  archive="$home/data/done-archive.md"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the archived sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archived-answer origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Archived sample review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-archived-call --title "Choose the archived option" \
+    --reason "captain archived choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" sample-archived-call >/dev/null \
+    || fail "completion failed before the answer"
+  printf 'Captain chose the archived option.\n' > "$home/archived-decision.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/archived-decision.txt" >/dev/null \
+    || fail "answer could not close the captain-held task"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the answered captain call did not verify before retention"
+
+  perl -0pi -e 's/done_keep = 10/done_keep = 0/' "$home/.tasks.toml"
+  tasks_in "$home" add sample-archived-trigger "Trigger Done retention" --kind ship --repo sample >/dev/null
+  tasks_in "$home" "done" sample-archived-trigger >/dev/null \
+    || fail "could not trigger Done retention"
+  assert_grep "sample-archived-call" "$archive" "Done retention did not archive the answered call"
+  if tasks_in "$home" show sample-archived-call >/dev/null 2>&1; then
+    fail "the archived call is still shown from the live backlog, so the fixture reproduces nothing"
+  fi
+
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/archived-verify.err" \
+    || fail "verify refused an answered call Done retention archived: $(cat "$home/archived-verify.err")"
+  run_captain "$home" complete "$id" sample-archived-call >/dev/null 2> "$home/archived-complete.err" \
+    || fail "complete refused an answered call Done retention archived: $(cat "$home/archived-complete.err")"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/archived-teardown.err" \
+    || fail "teardown refused a scout whose answered call was archived: $(cat "$home/archived-teardown.err")"
+
+  id=sample-archived-unanswered-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the unanswered sample" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  run_captain "$home" hold sample-archived-unanswered-call --title "Choose the unanswered option" \
+    --reason "captain unanswered choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the unanswered captain-held task"
+  run_captain "$home" complete "$id" sample-archived-unanswered-call >/dev/null \
+    || fail "completion failed for the unanswered hold"
+  tasks_in "$home" "done" sample-archived-unanswered-call >/dev/null \
+    || fail "could not close the unanswered hold out of band"
+  assert_grep "sample-archived-unanswered-call" "$archive" \
+    "Done retention did not archive the unanswered close"
+  if run_captain "$home" verify "$id" > "$home/unanswered-verify.out" 2> "$home/unanswered-verify.err"; then
+    fail "verify accepted an archived captain call closed with no recorded answer"
+  fi
+  if run_teardown "$home" "$id" > "$home/unanswered-teardown.out" 2> "$home/unanswered-teardown.err"; then
+    fail "teardown proceeded while an archived captain call had no recorded answer"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+
+  printf 'decisions_reviewed=1\ndecision_keys=sample-never-held-call\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/missing-verify.out" 2> "$home/missing-verify.err"; then
+    fail "verify accepted an attested captain call that exists nowhere"
+  fi
+  assert_grep "sample-never-held-call" "$home/missing-verify.err" \
+    "the refusal did not name the missing captain call"
+  pass "an answered captain call archived by Done retention still satisfies the completion gate"
+}
+
+# The archive location is not always beside the backlog: tasks-axi honours a
+# [markdown] archive set only in the user-level $HOME/.tasks-axi/config.toml, and
+# resolves a relative value against the backlog root. The completion gate must
+# resolve it the same way, or an answered call retention moved there reads as
+# absent and teardown is refused.
+test_archived_answer_in_a_user_configured_archive_satisfies_the_gate() {
+  local home axi_home archive id
+  home=$(make_home archived-answer-userconfig)
+  axi_home="$home/axi-home"
+  mkdir -p "$axi_home/.tasks-axi"
+  # Root config sets no archive, so the location comes only from the user config.
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+done_keep = 10
+EOF
+  cat > "$axi_home/.tasks-axi/config.toml" <<'EOF'
+[markdown]
+archive = "data/relocated-done-archive.md"
+EOF
+  archive="$home/data/relocated-done-archive.md"
+  id=sample-userconfig-review
+  mkdir -p "$home/data/$id"
+  HOME="$axi_home" tasks_in "$home" add "$id" "Investigate the user-config sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the user-config origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# User-config sample review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  HOME="$axi_home" run_captain "$home" hold sample-userconfig-call --title "Choose the relocated option" \
+    --reason "captain relocated choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  HOME="$axi_home" run_captain "$home" complete "$id" sample-userconfig-call >/dev/null \
+    || fail "completion failed before the answer"
+  printf 'Captain chose the relocated option.\n' > "$home/userconfig-decision.txt"
+  HOME="$axi_home" run_captain "$home" answer sample-userconfig-call --decision-file "$home/userconfig-decision.txt" >/dev/null \
+    || fail "answer could not close the captain-held task"
+
+  perl -0pi -e 's/done_keep = 10/done_keep = 0/' "$home/.tasks.toml"
+  HOME="$axi_home" tasks_in "$home" add sample-userconfig-trigger "Trigger Done retention" --kind ship --repo sample >/dev/null
+  HOME="$axi_home" tasks_in "$home" "done" sample-userconfig-trigger >/dev/null \
+    || fail "could not trigger Done retention"
+  assert_present "$archive" "Done retention did not write the user-configured archive"
+  assert_grep "sample-userconfig-call" "$archive" \
+    "Done retention did not archive the answered call to the user-configured location"
+  if HOME="$axi_home" tasks_in "$home" show sample-userconfig-call >/dev/null 2>&1; then
+    fail "the archived call is still shown from the live backlog, so the fixture reproduces nothing"
+  fi
+
+  HOME="$axi_home" run_captain "$home" verify "$id" >/dev/null 2> "$home/userconfig-verify.err" \
+    || fail "verify refused an answered call archived to the user-configured location: $(cat "$home/userconfig-verify.err")"
+  HOME="$axi_home" run_captain "$home" complete "$id" sample-userconfig-call >/dev/null 2> "$home/userconfig-complete.err" \
+    || fail "complete refused an answered call archived to the user-configured location: $(cat "$home/userconfig-complete.err")"
+  HOME="$axi_home" run_teardown "$home" "$id" >/dev/null 2> "$home/userconfig-teardown.err" \
+    || fail "teardown refused a scout whose answered call was archived to the user-configured location: $(cat "$home/userconfig-teardown.err")"
+  pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
+}
+
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
@@ -5160,7 +4773,6 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
-test_keyed_answer_replay_stays_with_its_hold
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
@@ -5170,11 +4782,6 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
-test_deck_answer_retires_the_card_and_wakes_a_main_home
-test_answer_from_the_owning_session_wakes_nobody
-test_secondmate_deck_answer_publishes_retires_and_wakes_its_home
-test_reheld_call_with_a_rewritten_body_still_closes_its_parent_decision
-test_remote_secondmate_answer_wakes_its_host_local_lane
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
@@ -5215,8 +4822,11 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_archived_answered_hold_still_satisfies_the_gate
+test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
 test_hold_writes_a_raise_time_decision_card
 test_authored_merge_cards_enforce_release_mode
 test_hold_refuses_an_invalid_card_before_any_mutation
 test_card_rewrites_an_open_call_and_a_rehold_preserves_it
 test_card_refuses_a_closed_call
+test_deck_merge_answer_keeps_the_ship_open_until_landing
