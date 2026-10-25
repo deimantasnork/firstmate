@@ -3239,6 +3239,23 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
 
+### Profile flag
+
+Verified on 2026-10-24 against omp 18.4.3 (`~/.bun/bin/omp`, a Bun package install) on macOS 15 arm64, for the [per-secondmate omp profile](../configuration.md#per-secondmate-omp-profile) pin.
+omp extracts `--profile` from anywhere in its arguments, so the flag Firstmate places right after the executable and before `--config` is honored, and it applies to subcommands such as the catalog check's `models --json`:
+
+```text
+$ OMP_SKIP_SETUP=1 omp --profile speak4 --config .omp/fm-worker-overlay.yml --version
+18.4.3
+$ OMP_SKIP_SETUP=1 omp --profile speak4 models --json | jq -r '[.models[].provider]|unique|join(" ")'
+amazon-bedrock anthropic bedrock-mantle ollama openai-codex
+$ OMP_SKIP_SETUP=1 omp --profile BAD models --json
+Error: Invalid OMP profile "BAD". Profile names must match ^[a-z0-9][a-z0-9._-]{0,63}$, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).
+```
+
+`bin/fm-omp-profile-lib.sh` enforces the same name rule before launch, and `tests/fm-omp-harness.test.sh` pins the flag position, the profile-scoped catalog check, and the unpinned launch through a fake omp.
+Repeat these commands after an omp upgrade to refresh this record.
+
 ## Busy inbox escalation
 
 Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091a7a799` with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.

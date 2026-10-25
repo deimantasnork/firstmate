@@ -1325,6 +1325,33 @@ The relaunch checks the selected pin before stopping the current agent.
 Per-secondmate pins stay in the primary home and are not inherited or copied into the secondmate's home.
 A matching primary-side per-secondmate pin for a remote route refuses before remote launch, because its account must be configured on that host instead.
 
+### Per-secondmate omp profile
+
+To launch one local omp secondmate under its own isolated omp profile, create `config/secondmate-accounts/<id>/omp-profile` in the primary home.
+Use the secondmate's registered identifier for `<id>`.
+The file holds one omp profile name on a single line, with an optional final newline.
+The name must match omp's own profile rule, `^[a-z0-9][a-z0-9._-]{0,63}$`, must not end in `.`, and must not be a Windows reserved device name (`con`, `prn`, `aux`, `nul`, `com0`-`com9`, `lpt0`-`lpt9`), alone or with an extension such as `nul.x`.
+
+When the file is present, that secondmate's omp agent launches as `omp --profile <name>`, so it uses that profile's own logins, sessions, settings, and caches rather than the primary's default omp profile.
+The model catalog check before launch reads the same profile.
+When the file is absent, the launch carries no `--profile` flag and is unchanged.
+There is no home-wide fallback file.
+
+Only a local secondmate's own omp agent reads this file.
+Ships, scouts, other runners, and remote secondmates never read it, and another secondmate's file never applies.
+The profile pin is independent of the [per-secondmate account pins](#per-secondmate-account-pins), which select a Claude or Pi login root rather than an omp profile.
+
+For example, `config/secondmate-accounts/speak4/omp-profile` containing `speak4` launches the local secondmate named `speak4` with `omp --profile speak4`.
+An empty, malformed, or unreadable file refuses with its path before any worker endpoint, local copy, or task record exists, and never falls back to the default profile.
+A raw omp launch command cannot carry the flag, so a pinned secondmate refuses one; launch it with `--harness omp`.
+Firstmate does not create, sign in, or copy an omp profile; sign in to it yourself with `omp --profile <name>`.
+
+The spawn prints the pin as `omp_profile=` and records the same field in the task record.
+Every spawn, control-plane relaunch, and automatic recovery reads the file again, and a relaunch checks it before stopping the current agent.
+After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
+The file stays in the primary home and is not inherited or copied into the secondmate's home, because a secondmate does not launch secondmates.
+[`bin/fm-omp-profile-lib.sh`](../bin/fm-omp-profile-lib.sh) owns parsing and the refusals.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.

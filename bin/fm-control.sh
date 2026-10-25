@@ -89,6 +89,9 @@
 #              the stop (bin/fm-task-staging-lib.sh owns the rule), so a directory
 #              the launch owner would refuse refuses the relaunch while the old
 #              agent is still running.
+#              A replacement omp secondmate likewise passes its per-secondmate
+#              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
+#              stops.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
@@ -208,6 +211,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-task-staging-lib.sh
 . "$SCRIPT_DIR/fm-task-staging-lib.sh"
+# shellcheck source=bin/fm-omp-profile-lib.sh
+. "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
 
@@ -1079,6 +1084,8 @@ resolve_relaunch_profile() {
   [ "$KIND" != secondmate ] || account_mate=$ID
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" "" "$account_mate" >/dev/null || return 1
+  fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals
   # (bin/fm-polytoken-lib.sh owns them). The launch owner retires the prior
   # incarnation's own generated hook layer, so only one it did not generate
