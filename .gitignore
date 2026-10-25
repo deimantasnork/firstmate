@@ -13,3 +13,6 @@ __pycache__/
 config/
 
 .tools/
+
+# Local JavaScript dependencies (the Pi type-checking project installs under .pi)
+node_modules/
