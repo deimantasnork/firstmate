@@ -3,15 +3,42 @@
     "allowImportingTsExtensions": true,
     "allowJs": true,
     "checkJs": true,
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": true,
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "types": ["node"],
-    "typeRoots": ["./.pi/node_modules/@types"]
+    "types": [
+      "node"
+    ],
+    "typeRoots": [
+      "./.pi/node_modules/@types"
+    ]
   },
-  "include": [".pi/**/*"]
+  "include": [
+    ".pi/**/*"
+  ],
+  "files": [
+    ".pi/extensions/fm-branch-supervision.ts",
+    ".pi/extensions/fm-calm.ts",
+    ".pi/extensions/fm-primary-pi-watch.ts",
+    ".pi/extensions/fm-primary-turnend-guard.ts",
+    ".pi/extensions/lib/fm-async-exec.ts",
+    ".pi/extensions/lib/fm-branch-dispatch.ts",
+    ".pi/extensions/lib/fm-branch-model-picker.ts",
+    ".pi/extensions/lib/fm-calm-assistant-layout.ts",
+    ".pi/extensions/lib/fm-calm-operational-user-layout.ts",
+    ".pi/extensions/lib/fm-calm-pending-operational-layout.ts",
+    ".pi/extensions/lib/fm-calm-preservation.ts",
+    ".pi/extensions/lib/fm-calm-visibility.ts",
+    ".pi/extensions/lib/fm-calm-working-ship-sprite.ts",
+    ".pi/extensions/lib/fm-calm-working-ship.ts",
+    ".pi/extensions/lib/fm-native-contract.ts",
+    ".pi/extensions/lib/fm-operational-input.ts",
+    ".pi/extensions/lib/fm-sessionstart-supervisor.mjs"
+  ]
 }
