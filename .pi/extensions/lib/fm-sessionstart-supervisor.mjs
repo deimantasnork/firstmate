@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 const [runner, ...args] = process.argv.slice(2);
+/** @type {number | null | undefined} */
 let runnerCode;
 let outputBytes = 0;
 let pendingWrites = 0;

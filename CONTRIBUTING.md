@@ -86,6 +86,23 @@ Coordinate any workflow rollback with its required-check names so a retired chec
 
 ## Development
 
+### Pi extension type-checking
+
+The self-contained [`.pi/tsconfig.json`](.pi/tsconfig.json) checks all TypeScript and JavaScript under `.pi/`, including the shared Calm helpers reached through symlinks.
+Install its locked development dependencies with Node.js 22.19 or newer, then run the strict, no-emit check from the repository root:
+
+```sh
+npm --prefix .pi ci --ignore-scripts --no-audit --no-fund
+npm --prefix .pi run typecheck
+```
+
+The project pins TypeScript, `@types/node`, TypeBox, and the directly imported Pi packages to the versions used by the existing Pi 1.2.0 consumer check.
+Editors discover this project for `.pi/` sources after installation; no global TypeScript or Pi installation is needed.
+`skipLibCheck` skips third-party declaration checking while extension sources remain checked with `strict` and `checkJs`.
+The existing `tests/fm-pi-primary-types.test.sh` retains the separate Pi 1.1.0 and 1.2.0 compatibility matrix.
+
+### Shared tooling
+
 Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
