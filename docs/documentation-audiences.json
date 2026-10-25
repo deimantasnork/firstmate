@@ -33,6 +33,7 @@
     "docs/cmux-backend.md",
     "docs/paseo-backend.md",
     "docs/rex-backend.md",
+    "docs/t3code-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -98,6 +99,10 @@
     },
     {
       "source": "docs/cmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/t3code-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -192,6 +197,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/commandcode.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/cortex.md",
       "audience": "agent-runtime"
     },
     {
@@ -491,6 +500,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/t3code-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
@@ -516,6 +529,10 @@
     },
     {
       "path": "docs/verification/commandcode.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/cortex.md",
       "audience": "maintainer-verification"
     },
     {
@@ -596,6 +613,10 @@
     },
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/kimi-code-2.3.0/README.md",
       "audience": "maintainer-verification"
     },
     {

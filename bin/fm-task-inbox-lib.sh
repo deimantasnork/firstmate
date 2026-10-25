@@ -12,14 +12,14 @@
 # none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
-# payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line. While the endpoint remains available, that
+# payload moves to the filesystem, which is reliable; the backend endpoint carries
+# only a short constant doorbell line. While the endpoint remains available, that
 # line does not need to be reliable because ringing it again is free. A
 # duplicated doorbell is a no-op by construction (the worker finds the inbox
 # empty or already handled), and a swallowed doorbell is detected by the
 # absence of the worker's acknowledgement and re-rung on a bounded schedule.
 # A positively dead or missing endpoint bypasses that schedule without being
-# typed into, and its unhandled record surfaces through the ordinary stale wake
+# submitted to, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
@@ -55,13 +55,11 @@
 # composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
-# by a busy pane consume a separate durable consecutive-poll budget,
+# by the caller's delivery guard consume a separate durable consecutive-poll budget,
 # FM_TASK_INBOX_BUSY_MAX. At that bound the same escalation path surfaces a
-# stuck-busy reason without typing. That marker suppresses further alarms,
-# but preserves delivery: remaining paced attempts resume on proven idle.
-# The busy record retains that obligation until acknowledgement or exhaustion
-# of the delivery-attempt budget; ordinary non-busy checks reset it before
-# escalation. Fire-and-forget retries remain outside escalation. A positively
+# stuck-busy reason without submission. An allowed due check or acknowledgement
+# resets this budget. fm-busy-lib.sh owns the backend-specific delivery guard.
+# Fire-and-forget retries remain outside escalation. A positively
 # dead or missing endpoint skips delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
 # If delivery-attempt or busy-deferral bookkeeping fails while the record remains unhandled,
