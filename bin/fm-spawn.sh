@@ -3676,8 +3676,9 @@ fi
 
 # An account whose plan lacks the dispatched model can still serve the profile
 # through its declared substitution. The launch and the task record then name
-# the model that actually ran.
+# the model that actually ran and its ultracode decision.
 CLAUDE_ULTRACODE=0
+CLAUDE_ULTRACODE_DECISION=
 if [ "${ACCOUNT_VENDOR:-}" = claude ] && [ -n "${ACCOUNT_NAME:-}" ] && [ -n "$MODEL" ]; then
   ACCOUNT_SUBSTITUTION=$(account_model_substitution "$ACCOUNT_NAME" "$MODEL")
   if [ -n "$ACCOUNT_SUBSTITUTION" ]; then
@@ -3686,10 +3687,23 @@ if [ "${ACCOUNT_VENDOR:-}" = claude ] && [ -n "${ACCOUNT_NAME:-}" ] && [ -n "$MO
     if [ -n "$ACCOUNT_SUBSTITUTED_MODEL" ] && [ "$ACCOUNT_SUBSTITUTED_MODEL" != "$MODEL" ]; then
       echo "notice: account $ACCOUNT_NAME serves $MODEL as $ACCOUNT_SUBSTITUTED_MODEL${ACCOUNT_SUBSTITUTED_ULTRACODE:+ (ultracode=$ACCOUNT_SUBSTITUTED_ULTRACODE)}" >&2
       MODEL=$ACCOUNT_SUBSTITUTED_MODEL
-      [ "$ACCOUNT_SUBSTITUTED_ULTRACODE" = yes ] && CLAUDE_ULTRACODE=1
+      CLAUDE_ULTRACODE_DECISION=$ACCOUNT_SUBSTITUTED_ULTRACODE
     fi
   fi
 fi
+# A relaunch replays the recorded model (bin/fm-control.sh passes it back as
+# --model), so while it launches that same model it replays the ultracode
+# decision recorded beside it too; any other model leaves that decision behind.
+if [ -z "$CLAUDE_ULTRACODE_DECISION" ] && [ -n "$RELAUNCH_META" ] \
+  && [ "${ACCOUNT_VENDOR:-}" = claude ] && [ -n "$MODEL" ] \
+  && [ "$MODEL" = "$(fm_meta_get "$RELAUNCH_META" model)" ]; then
+  CLAUDE_ULTRACODE_DECISION=$(fm_meta_get "$RELAUNCH_META" ultracode)
+fi
+case "$CLAUDE_ULTRACODE_DECISION" in
+  yes) CLAUDE_ULTRACODE=1 ;;
+  no) ;;
+  *) CLAUDE_ULTRACODE_DECISION= ;;
+esac
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -7113,7 +7127,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model ultracode effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7143,6 +7157,9 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
+  # Written only beside a substituted model, so every other record stays
+  # byte-identical.
+  [ -z "$CLAUDE_ULTRACODE_DECISION" ] || echo "ultracode=$CLAUDE_ULTRACODE_DECISION"
   echo "effort=${EFFORT:-default}"
   # The detected OpenCode major, recorded so fm-control sends the exit key this
   # agent's TUI understands. Written only when a version was resolved, so a

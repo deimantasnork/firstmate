@@ -1209,6 +1209,55 @@ test_explicit_model_wins_over_the_recorded_one() {
   pass "fm-control relaunch: explicit model and effort win over the recorded ones"
 }
 
+# An account model substitution records the model it served, and a relaunch
+# replays that recorded model, so the ultracode setting the substitution came
+# with must be replayed beside it, and only while that model is the one launched.
+test_substituted_relaunch_keeps_ultracode() {
+  local dir out rc id=rl-subst store literal
+  dir=$(new_case subst "$id")
+  add_ship_task "$dir" "$id" claude
+  store="$dir/stores/secondary"
+  mkdir -p "$dir/home/config" "$store"
+  printf '{"schemaVersion":5,"providers":[{"provider":"claude","account":{"email":"claude@example.com"},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":60,"runway":{"status":"through_reset"}}]}}]}\n' \
+    > "$store/.fm-quota.json"
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${2:-}" = claude ] || exit 2
+cat "$CLAUDE_CONFIG_DIR/.fm-quota.json"
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+  cat > "$dir/home/config/crew-accounts.json" <<JSON
+{
+  "accounts": [
+    { "name": "secondary", "claude_config_dir": "$store",
+      "model_substitutions": { "claude-fable-5-1": { "model": "claude-opus-5-5", "ultracode": true } } }
+  ]
+}
+JSON
+  printf 'account=secondary\naccount_pin=yes\n' >> "$dir/home/state/$id.meta"
+
+  out=$(run_control "$dir" "$id" relaunch --model claude-fable-5-1 --note "substituted profile"); rc=$?
+  expect_code 0 "$rc" "a relaunch onto a substituted model should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" model)" = claude-opus-5-5 ] || fail "the substituted model was not recorded"
+  assert_contains "$(cat "$dir/fake/literal")" '"ultracode":true' "the substitution's ultracode setting did not reach the launch"
+
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "same substituted lane"); rc=$?
+  expect_code 0 "$rc" "a relaunch of the substituted task should succeed"$'\n'"$out"
+  literal=$(cat "$dir/fake/literal")
+  assert_contains "$literal" "--model 'claude-opus-5-5'" "the relaunch did not replay the recorded model"
+  assert_contains "$literal" '"ultracode":true' "the relaunch dropped the ultracode setting its substitution came with"
+  [ "$(grep -c '^ultracode=' "$dir/home/state/$id.meta")" -eq 1 ] \
+    || fail "the relaunch must record the ultracode decision exactly once: $(cat "$dir/home/state/$id.meta")"
+
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --model sonnet --note "another model"); rc=$?
+  expect_code 0 "$rc" "a relaunch onto an explicit other model should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" '"ultracode":true' "ultracode outlived the model it was recorded with"
+  assert_no_grep "ultracode=" "$dir/home/state/$id.meta" "the record kept an ultracode decision for a model it no longer runs"
+  pass "fm-control relaunch: a substituted task relaunches with the same model and ultracode setting it first ran"
+}
+
 test_relaunch_onto_an_unverified_harness_is_refused() {
   local dir out rc
   dir=$(new_case badharness rl8)
@@ -3317,6 +3366,7 @@ test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
+test_substituted_relaunch_keeps_ultracode
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm

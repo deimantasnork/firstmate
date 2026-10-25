@@ -1660,6 +1660,7 @@ A store path is absolute or starts with `~/`, carries no control character, and 
 `model_substitutions` is optional and maps a dispatched model name to `{ "model": "<effective model>", "ultracode": <true|false> }`.
 It lets an account whose plan lacks a model serve the same dispatch profile with another model instead of failing or being skipped.
 `fm-spawn.sh` applies it after the account is chosen, records the effective model in `model=` on the task record, and, when `ultracode` is true, adds `"ultracode":true` to that worker's Claude settings.
+It records that decision beside the model as `ultracode=yes` or `ultracode=no`, and a relaunch that replays the recorded model reapplies it, while a relaunch onto any other model leaves it behind.
 It applies only to Claude launches and only when the dispatched model matches a declared key.
 Each vendor evaluates the accounts in declaration order, skipping any account that declares no store for that vendor, so adding an account never silently excludes it.
 An absent file means every spawn keeps today's single-store behavior.

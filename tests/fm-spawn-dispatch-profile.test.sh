@@ -681,6 +681,7 @@ JSON
   assert_contains "$launch" '"ultracode":true' "the ultracode setting did not reach the launch"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep "model=claude-opus-5-5" "$meta" "the effective model was not recorded"
+  assert_grep "ultracode=yes" "$meta" "the substitution's ultracode decision was not recorded"
   pass "an account model substitution serves the profile with its own model"
 }
 
