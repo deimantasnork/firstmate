@@ -1418,7 +1418,7 @@ test_secondmate_claude_relaunch_keeps_local_settings() {
 # to fm-spawn --relaunch, which moves only the drained vendor while the home is
 # idle and keeps every store while it has work in flight.
 test_idle_secondmate_relaunch_re_resolves_only_a_drained_store() {
-  local dir home stores out rc
+  local dir home stores out rc field
   dir=$(new_case smstore sms)
   home="$dir/home"
   stores="$dir/stores"
@@ -1503,6 +1503,11 @@ SH
     || fail "an idle relaunch moved the claude store that still had headroom"
   assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$stores/colleague-codex'" \
     "the relaunched secondmate was not launched on the re-resolved codex store"
+  for field in account_codex codex_home account_claude claude_config_dir; do
+    [ "$(grep -c "^$field=" "$home/state/sms.meta")" -eq 1 ] \
+      || fail "relaunch appended stale $field values to the resolved account record"
+  done
+  assert_no_grep '_pin=' "$home/state/sms.meta" "an automatic re-resolution became an explicit pin"
   pass "fm-control relaunch: an idle secondmate moves only a drained recorded store, a busy one keeps both"
 }
 
