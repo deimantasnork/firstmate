@@ -10,8 +10,8 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -362,6 +362,46 @@ The flag is off when absent, is not inherited, and has no effect on other primar
 The host reads its presence at each hand-back, so enabling it needs no session restart.
 Removing it stops further retries and leaves the current watcher for the ordinary next park.
 [Supervision host](supervision-host.md#acknowledged-hand-back) owns the acknowledgement, retry transport, and limits.
+
+## Warm-cache compaction (config/warm-compact)
+
+Create the home-local `config/warm-compact` file to compact an idle Claude primary and the supervision host's engine conversation before their prompt cache expires.
+A session that sits idle past the cache lifetime re-writes its whole context at the cache-write price on its next turn.
+Compacting while the cache is still warm reads the old context at the read price, so the next turn writes only the summary.
+
+The feature is off when the file is absent.
+The file is local to each home and is not inherited.
+The host reads it at every check, so creating or removing it needs no restart.
+It acts only on a home that runs the [supervision host](#supervision-host-configsupervision-host) beside a Claude primary, because the host's park is the primary's idle episode.
+
+The file may be empty or hold these lines, each optional:
+
+- `idle-seconds=<n>` is the idle time before a session is due (default 2700).
+- `min-context-tokens=<n>` is the context size below which a session is never due (default 80000).
+
+Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
+Context size is the last request's `input + cache_read + cache_creation` usage in the session's transcript.
+
+A session is compacted when all of these hold:
+
+- The home opted in.
+- The session has been idle for `idle-seconds`: the primary since its turn ended, the engine conversation since its last handled turn.
+- Its context is at least `min-context-tokens`.
+- It was not already compacted in this idle episode.
+  The host remembers a primary compaction for one park.
+  It records an engine compaction in the engine record, so a later host does not repeat it.
+- For the engine conversation, the next turn would resume it: the same engine, model, and prompt key, and below the rotation limit.
+  An abandoned compaction is not recorded, so a later check retries it.
+- For the primary, the agent reads idle and the composer reads provably empty.
+  A busy agent, a non-empty composer, or an unproven state defers the compaction; nothing is typed.
+
+The primary receives `/compact` through the backend's verified submit primitive (`fm_backend_send_text_submit`), the one the away-mode daemon injects through.
+The engine conversation receives `/compact` as one resumed, bounded headless turn.
+A compaction is housekeeping: it adds no wake, outcome, or close line, and it is recorded only in the host's log.
+A compacted primary still picks up pending wakes and decisions from disk, because a wake is a record the next drain reads, not conversation state.
+
+This feature does not set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or any other autocompact setting.
+`bin/fm-warm-compact-lib.sh` owns the guards, with coverage in [`tests/fm-warm-compact.test.sh`](../tests/fm-warm-compact.test.sh) and the opt-in live guard [`tests/fm-warm-compact-herdr-live-e2e.test.sh`](../tests/fm-warm-compact-herdr-live-e2e.test.sh).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -761,6 +801,52 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Record export (config/record-export-root)
+
+The optional local, gitignored `config/record-export-root` file contains exactly one absolute directory path and opts this home into a private copy of a fixed record allowlist.
+The setting is off by default and is not inherited by secondmate homes.
+When the file is absent, sync exits without export work, teardown follows its existing path, and spawn, watcher, presentation, classification, and snapshot readers remain unaware of exports.
+When the file is present, `python3` is required and an unreadable config directory or file is a hard failure rather than an opt-out.
+
+The configured path must name a dedicated root outside and disjoint from the effective home, config, data, and state trees.
+Its parent must already exist, while the final root may be absent so the exporter can create it.
+An existing root is accepted only when its strict versioned ownership marker names this canonical home, so one root cannot serve multiple homes.
+The exporter refuses an unmarked pre-existing directory, an owner mismatch, unknown managed artifacts, or unsafe object types instead of changing a broad or shared directory.
+Exporter-owned directories use mode `0750`, and exported files use mode `0640`.
+
+Run `bin/fm-record-export.sh sync` to publish the currently present allowlisted files through `<export-root>/live/`:
+
+```text
+data/{projects.md,backlog.md,done-archive.md}
+data/<task>/{brief.md,report.md,status*.log}
+state/fleet-ledger.jsonl
+state/<task>.{meta,status}
+state/<task>.inbox/{,handled/}NNN.msg
+```
+
+The command is one-shot and starts no network transfer, daemon, timer, or watcher.
+It does not recursively copy `data/` or `state/`, accept arbitrary sources, discover secrets, or redact content.
+The exporter opens source and destination components relative to verified directory descriptors with no-follow semantics, then rechecks source identity and content before publication.
+Sync builds a complete immutable generation, flushes its files and directories, and atomically replaces `live` with a relative symlink to that generation.
+Consumers that need one consistent snapshot resolve `live` once and read that immutable generation rather than resolving the pointer separately for each file.
+Superseded live generations remain selectable for 30 completed days before a later sync removes them.
+The published generation is exact, so a later sync retracts allowlisted files that are no longer live and represents a pending-to-handled message move only at its current path.
+
+Enabled teardown commits metadata, the live status when present, and pending and handled inbox messages under `<export-root>/archive/<task>/<spawn_gen>/` before those source records are retired.
+Direct archive calls acquire the task metadata lock, while teardown calls under the same lock it already holds, so the exact source set is re-enumerated immediately before commit.
+Each attempt builds a fresh sibling staging directory, flushes every copied file, directory, and manifest, and publishes the complete generation with one descriptor-relative rename.
+`manifest.v1.json` carries the version, capture time, completeness, source-relative names, byte counts, and SHA-256 values.
+Retries parse that JSON with duplicate-key rejection, require the exact v1 fields and types, and verify a one-to-one mapping between manifest entries and archived regular files.
+A reused task ID writes its distinct `spawn_gen` rather than overwriting an earlier generation.
+Only strictly valid committed generations older than 30 completed days are pruned by manifest mtime, matching task status archive retention, and scan failures warn without undoing a successful capture.
+If the archive cannot commit, teardown reports the reason and stops before deleting metadata, status, or inbox sources.
+Removing `config/record-export-root` is the explicit escape hatch back to ordinary teardown behavior.
+
+Briefs and handled inbox messages carry captain text, and every exported record can contain other sensitive operational data.
+Keep the export root private and never serve it directly.
+The schema is versioned for compatible readers, but it is not a Firstmate command API and no Firstmate reader consumes it.
+[`architecture.md`](architecture.md#read-only-record-exports) describes the mechanism boundary; [`bin/fm-record-export.sh`](../bin/fm-record-export.sh) owns the exact allowlist, schema, path checks, publication, and retention mechanics.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
@@ -1896,6 +1982,7 @@ A herdr, zellij, cmux, paseo, rex, t3code, or tern home is therefore never told 
 
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+- When `config/record-export-root` exists, record sync and teardown archival require `python3` for descriptor-relative filesystem transactions and strict manifest parsing.
 
 **Missing and outdated tool diagnostics**
 
